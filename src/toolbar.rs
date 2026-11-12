@@ -9,8 +9,8 @@
 //   点工具 → 切工具并显示画布（关键：之前漏了这一步，导致「点了画不出来」）
 //   点主图标 → 收纳 / 展开（收纳后只剩铅笔，半透明）
 //   拖空白处 → 移动工具条（靠 WM_NCHITTEST 返回 HTCAPTION）
-//   右键 → 退出菜单
-//   空格 → 全局切换画布显隐（见 hooks.rs）
+//   右键 → 展开态：收回主图标；收纳态：直接退出程序
+//   右侧 Ctrl → 全局展开 / 收纳（见 hooks.rs）
 
 #![allow(dead_code)]
 
@@ -46,8 +46,6 @@ const TIP_TEXT: &str = "点击或按右侧 Ctrl 键展开工具条";
 /// 这里必须自定义；漏了的话 match 模式会退化为变量绑定（匹配一切），
 /// 把 WM_NCCREATE 也吞掉返回 0，导致工具条窗口创建失败（句柄无效）。
 const WM_MOUSELEAVE: u32 = 0x02A3;
-
-const ID_EXIT: usize = 1;
 
 const TOOLS: &[(Tool, &str)] = &[
     (Tool::Pen, "画笔"),
@@ -925,7 +923,15 @@ unsafe extern "system" fn toolbar_wndproc(
             LRESULT(0)
         }
         WM_RBUTTONUP => {
-            show_menu(hwnd);
+            // 右键不再弹菜单：
+            //   展开态 → 收回主图标（和点主图标一个效果）
+            //   收纳态 → 直接退出程序
+            if EXPANDED {
+                hide_tip();
+                collapse_to_icon();
+            } else {
+                PostQuitMessage(0);
+            }
             LRESULT(0)
         }
         WM_DESTROY => LRESULT(0),
@@ -1132,30 +1138,6 @@ unsafe fn toggle_expanded(hwnd: HWND) {
         canvas::release_focus();
     }
     InvalidateRect(hwnd, None, true);
-}
-
-unsafe fn show_menu(hwnd: HWND) {
-    let mut pt = POINT::default();
-    GetCursorPos(&mut pt);
-    SetForegroundWindow(hwnd);
-    let menu = match CreatePopupMenu() {
-        Ok(m) => m,
-        Err(_) => return,
-    };
-    let _ = AppendMenuW(menu, MF_STRING, ID_EXIT, w!("退出"));
-    let cmd = TrackPopupMenu(
-        menu,
-        TPM_RETURNCMD | TPM_RIGHTBUTTON,
-        pt.x,
-        pt.y,
-        0,
-        hwnd,
-        None,
-    );
-    let _ = DestroyMenu(menu);
-    if cmd.0 as usize == ID_EXIT {
-        PostQuitMessage(0);
-    }
 }
 
 /// 把工具条收进主图标（不切换：已经是收纳态就什么都不做）
