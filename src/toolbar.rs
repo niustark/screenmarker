@@ -1065,6 +1065,24 @@ unsafe fn toggle_expanded(hwnd: HWND) {
         // 穿透态下空格已不再能展开工具条，唯一入口就是点主图标，
         // 所以这里必须把穿透态关掉，否则展开后画布仍穿透、点下去画不出来。
         canvas::set_click_through(false);
+
+        // 展开即默认选中「荧光笔」：展开工具条就是为了标注，
+        // 荧光笔是最高频的讲解工具（划重点），省掉每次再点一下的步骤。
+        let canvas_hwnd = HWND(TOOLBAR_CANVAS as *mut _);
+        if !canvas_hwnd.is_invalid() {
+            let state_ptr = TOOLBAR_STATE_PTR as *const RefCell<AppState>;
+            if !state_ptr.is_null() {
+                canvas::finalize_pending();
+                let cur = {
+                    let mut st = (*state_ptr).borrow_mut();
+                    st.tool = Tool::Highlighter;
+                    st.tool
+                };
+                canvas::show_canvas(canvas_hwnd);
+                raise_above_canvas(hwnd);
+                crate::cursor::apply(cur);
+            }
+        }
     } else {
         let s = collapsed_size();
         SetWindowPos(
