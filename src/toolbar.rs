@@ -1234,6 +1234,17 @@ pub fn is_expanded() -> bool {
     unsafe { EXPANDED }
 }
 
+/// 外部改了 state.tool 后调用：刷新按钮高亮。
+/// 文字输入框右键提交会把工具切回「选择」，此时工具条自己收不到任何消息，
+/// 不主动重绘的话「文字」按钮还会一直亮着。
+pub fn refresh() {
+    unsafe {
+        if TOOLBAR_HWND != 0 {
+            InvalidateRect(HWND(TOOLBAR_HWND as *mut _), None, true);
+        }
+    }
+}
+
 pub struct Toolbar {
     hwnd: HWND,
 }

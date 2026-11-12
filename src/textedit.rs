@@ -5,7 +5,8 @@
 //
 // 交互约定：
 //   Esc / 失焦 / 回车+Ctrl  → 提交并关闭（Esc 是最常用的「完成」手势）
-//   文字为空                → 删除该文字框
+//   输入框内右键            → 提交并关闭，工具切回「选择」，文字处于可选中态
+//   文字为空                → 删除该文字框（含输入框本身）
 
 #![allow(dead_code)]
 
@@ -31,6 +32,22 @@ static mut TE_HWND: HWND = HWND(ptr::null_mut());
 static mut TE_FONT: HFONT = HFONT(ptr::null_mut());
 static mut TE_SHAPE_IDX: usize = usize::MAX;
 static mut TE_CLOSING: bool = false;
+/// 右键提交时置位：提交完把工具切回「选择」（Esc / 失焦提交不切，方便连续写字）
+static mut TE_EXIT_TOOL: bool = false;
+
+// 右键消息常量自己定义：windows 0.58 里 WM_CONTEXTMENU 属于未开启的 feature，
+// 若写成 match 的消息分支会被编译器当成「变量绑定模式」吞掉其它消息
+// （WM_MOUSELEAVE 曾这样把 WM_NCCREATE 吃掉导致启动崩溃）。这里一律用 if 比较。
+const WM_RBUTTONDOWN_C: u32 = 0x0204;
+const WM_RBUTTONUP_C: u32 = 0x0205;
+const WM_CONTEXTMENU_C: u32 = 0x007B;
+
+/// 输入框内右键：DOWN 先吞掉（不让 EDIT 进入系统右键菜单流程），
+/// UP / CONTEXTMENU 时再提交关闭。放在 UP 提交是为了避免鼠标抬起
+/// 落到已被销毁窗口下面的画布上，触发画布自己的右键逻辑。
+fn is_right_click(msg: u32) -> bool {
+    msg == WM_RBUTTONDOWN_C || msg == WM_RBUTTONUP_C || msg == WM_CONTEXTMENU_C
+}
 
 /// 同一个输入窗口复用于两种场景：
 ///   Text      —— 画布上的文字标注（内容写回 Shape::Text）
@@ -52,6 +69,17 @@ static mut EDIT_OLD_PROC: isize = 0;
 unsafe extern "system" fn edit_proc(
     hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM,
 ) -> LRESULT {
+    if is_right_click(msg) {
+        // 按下只吞消息，抬起时才提交并关闭输入框
+        if msg == WM_RBUTTONDOWN_C {
+            return LRESULT(0);
+        }
+        if let Ok(parent) = GetParent(hwnd) {
+            TE_EXIT_TOOL = true;
+            commit_and_close(parent);
+        }
+        return LRESULT(0);
+    }
     if msg == WM_KEYDOWN {
         let vk = wparam.0 as u16;
         if vk == VK_ESCAPE.0 {
@@ -81,6 +109,16 @@ const EN_CHANGE_CODE: usize = 0x0300;
 unsafe extern "system" fn te_wndproc(
     hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM,
 ) -> LRESULT {
+    // 右键可能落在外层窗口（虚线框那一圈），同样按「结束输入」处理。
+    // 必须放在 match 之前用 if 判断，见上面常量的说明。
+    if is_right_click(msg) {
+        if msg == WM_RBUTTONDOWN_C {
+            return LRESULT(0);
+        }
+        TE_EXIT_TOOL = true;
+        commit_and_close(hwnd);
+        return LRESULT(0);
+    }
     match msg {
         WM_KEYDOWN => {
             if wparam.0 as u16 == VK_ESCAPE.0 {
@@ -252,14 +290,29 @@ unsafe fn commit_and_close(hwnd: HWND) {
                 st.text_editing = false;
             }
             TE_SHAPE_IDX = usize::MAX;
-            // 提交后直接选中：不用再点一次，立刻就能拖动/缩放手柄
+            // 提交后直接选中：不用再点一次，立刻就能拖动/缩放手柄；
+            // 空内容被删掉时则清掉选中态，别让旧索引指向别的图元。
             if kept {
                 crate::canvas::select_index(idx);
+            } else {
+                crate::canvas::select_none();
             }
             crate::dbg::log(&format!("文字提交 idx={idx} kept={kept}"));
             crate::canvas::repaint_global();
         }
         TE_MODE = Mode::Text;
+    }
+
+    // 右键提交额外收尾：工具切回「选择」，让刚写完的文字处于标准可选中态
+    // （有选中框，可直接拖动/缩放/滚轮改大小）。Esc、失焦提交不受影响，
+    // 仍留在文字工具，方便接着点下一处继续写。
+    if TE_EXIT_TOOL {
+        TE_EXIT_TOOL = false;
+        if mode == Mode::Text && !state_ptr.is_null() {
+            (*state_ptr).borrow_mut().tool = crate::shape::Tool::Select;
+            // 工具条的按钮高亮是从 state.tool 读的，改完必须重绘
+            crate::toolbar::refresh();
+        }
     }
 
     let _ = DestroyWindow(hwnd);
