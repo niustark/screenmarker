@@ -223,24 +223,44 @@ unsafe fn collapsed_size() -> i32 {
 
 // ---------- 绘制 ----------
 
-/// 按钮底：普通灰 / 选中浅蓝 + 蓝圈。图标由 icons.rs 叠在上面。
+/// PixPin 风格的圆角小瓷砖：填充 + 描边，圆角随缩放。
+/// 在 4 倍超采样位图上作画，线宽/圆角都乘 s。
+unsafe fn round_tile(
+    hdc: HDC,
+    r: RECT,
+    fill: COLORREF,
+    border: COLORREF,
+    border_w: f32,
+    radius: f32,
+    s: f32,
+) {
+    let pen = CreatePen(PS_SOLID, ((border_w * s) as i32).max(1), border);
+    let brush = CreateSolidBrush(fill);
+    let op = SelectObject(hdc, HGDIOBJ(pen.0));
+    let ob = SelectObject(hdc, HGDIOBJ(brush.0));
+    let rad = ((radius * s) as i32).max(2);
+    RoundRect(hdc, r.left, r.top, r.right + 1, r.bottom + 1, rad, rad);
+    SelectObject(hdc, ob);
+    SelectObject(hdc, op);
+    DeleteObject(HGDIOBJ(pen.0));
+    DeleteObject(HGDIOBJ(brush.0));
+}
+
+/// 按钮瓷砖：普通态白底 + 浅灰描边；选中态白底 + 蓝色描边（PixPin 同款）。
+/// 白底瓷砖在任何背景（包括纯白桌面）上都有清晰的轮廓。
 unsafe fn button_bg(hdc: HDC, r: RECT, active: bool, s_: f32) {
-    let bg = if active {
-        c(0xDB, 0xE9, 0xFF)
-    } else {
-        c(0xF0, 0xF1, 0xF3)
-    };
-    let b = CreateSolidBrush(bg);
-    FillRect(hdc, &r, b);
-    DeleteObject(HGDIOBJ(b.0));
     if active {
-        let pen = CreatePen(PS_SOLID, ((2.0 * s_) as i32).max(1), c(0x0A, 0x84, 0xFF));
-        let old = SelectObject(hdc, HGDIOBJ(pen.0));
-        let ob = SelectObject(hdc, GetStockObject(NULL_BRUSH));
-        Rectangle(hdc, r.left, r.top, r.right, r.bottom);
-        SelectObject(hdc, ob);
-        SelectObject(hdc, old);
-        DeleteObject(HGDIOBJ(pen.0));
+        round_tile(
+            hdc,
+            r,
+            c(0xF2, 0xF7, 0xFF),
+            c(0x0A, 0x84, 0xFF),
+            2.0,
+            8.0,
+            s_,
+        );
+    } else {
+        round_tile(hdc, r, c(0xFF, 0xFF, 0xFF), c(0xD9, 0xDD, 0xE2), 1.0, 8.0, s_);
     }
 }
 
@@ -255,11 +275,9 @@ fn icon_rect(r: RECT, s: f32) -> RECT {
     )
 }
 
-/// 线宽预览：一条当前粗细、当前颜色的线（滚轮改粗细后立刻能看到效果）
+/// 线宽预览：一条当前粗细、当前颜色的线（滚轮改粗细后立刻能看到效果）。
+/// PixPin 风格：不铺灰底，就是一条线，干干净净。
 unsafe fn draw_width_preview(hdc: HDC, r: RECT, width: f32, color: Color, s: f32) {
-    let b = CreateSolidBrush(c(0xF0, 0xF1, 0xF3));
-    FillRect(hdc, &r, b);
-    DeleteObject(HGDIOBJ(b.0));
     let cy = (r.top + r.bottom) / 2;
     // 线横跨整个预览格，左右不留空白（用户要求占满）
     let pad = (2.0 * s) as i32;
@@ -278,9 +296,6 @@ unsafe fn draw_width_preview(hdc: HDC, r: RECT, width: f32, color: Color, s: f32
 /// 文字工具下的预览格：显示一个「A」，字号跟着滑块走，
 /// 这样拖动滑块能直接看出字号变化（不再只看到一条粗细线，看不出跟文字的关系）
 unsafe fn draw_text_preview(hdc: HDC, r: RECT, font_size: f32, color: Color, s: f32) {
-    let b = CreateSolidBrush(c(0xF0, 0xF1, 0xF3));
-    FillRect(hdc, &r, b);
-    DeleteObject(HGDIOBJ(b.0));
     let cell = (r.bottom - r.top) as f32;
     let t = ((font_size - 16.0) / (160.0 - 16.0)).clamp(0.0, 1.0);
     let px = (cell * (0.40 + 0.52 * t)).max(9.0 * s);
@@ -319,34 +334,32 @@ fn slider_span(r: RECT, s: f32) -> (i32, i32) {
     (r.left + pad, r.right - pad)
 }
 
-/// 粗细 / 字号滑块：左侧填充到当前值，右端一个白色圆点
-unsafe fn draw_slider(hdc: HDC, r: RECT, width: f32, s: f32) {
-    let b = CreateSolidBrush(c(0xF0, 0xF1, 0xF3));
-    FillRect(hdc, &r, b);
-    DeleteObject(HGDIOBJ(b.0));
-
+/// 粗细 / 字号滑块：左侧填充到当前值（用当前颜色），右端一个白色圆点。
+/// PixPin 风格：不铺底，只有一条细轨道。
+unsafe fn draw_slider(hdc: HDC, r: RECT, width: f32, color: Color, s: f32) {
     let (x0, x1) = slider_span(r, s);
     let cy = (r.top + r.bottom) / 2;
     let th = ((4.0 * s) as i32).max(2);
     let t = ((width - W_MIN) / (W_MAX - W_MIN)).clamp(0.0, 1.0);
     let kx = x0 + (((x1 - x0) as f32) * t) as i32;
+    let col = c(color.red(), color.green(), color.blue());
 
     // 轨道底色
-    let track = CreateSolidBrush(c(0xD3, 0xD7, 0xDD));
+    let track = CreateSolidBrush(c(0xDC, 0xDF, 0xE4));
     FillRect(hdc, &rect(x0, cy - th / 2, (x1 - x0).max(1), th), track);
     DeleteObject(HGDIOBJ(track.0));
 
-    // 已选中部分：蓝色
+    // 已选中部分：当前颜色
     if kx > x0 {
-        let fg = CreateSolidBrush(c(0x0A, 0x84, 0xFF));
+        let fg = CreateSolidBrush(col);
         FillRect(hdc, &rect(x0, cy - th / 2, kx - x0, th), fg);
         DeleteObject(HGDIOBJ(fg.0));
     }
 
-    // 圆点：白底 + 蓝色描边
+    // 圆点：白底 + 当前颜色描边
     let knob = ((13.0 * s) as i32).max(8);
     let white = CreateSolidBrush(c(0xFF, 0xFF, 0xFF));
-    let pen = CreatePen(PS_SOLID, ((2.0 * s) as i32).max(1), c(0x0A, 0x84, 0xFF));
+    let pen = CreatePen(PS_SOLID, ((2.0 * s) as i32).max(1), col);
     let ob = SelectObject(hdc, HGDIOBJ(white.0));
     let op = SelectObject(hdc, HGDIOBJ(pen.0));
     Ellipse(hdc, kx - knob / 2, cy - knob / 2, kx + knob / 2, cy + knob / 2);
@@ -376,66 +389,16 @@ unsafe fn slider_apply(hwnd: HWND, r: RECT, x: i32, state_ptr: *const RefCell<Ap
 }
 
 unsafe fn draw_swatch(hdc: HDC, r: RECT, color: Color, selected: bool, s: f32) {
-    let b = CreateSolidBrush(COLORREF(
+    // 圆角色块：填充本色；描边选中时蓝色加粗，未选中浅灰细边
+    // （白色块靠灰边和白色瓷砖区分开来）
+    let fill = COLORREF(
         ((color.blue() as u32) << 16) | ((color.green() as u32) << 8) | color.red() as u32,
-    ));
-    FillRect(hdc, &r, b);
-    DeleteObject(HGDIOBJ(b.0));
-    let pen_c = if selected {
-        c(0x0A, 0x84, 0xFF)
+    );
+    if selected {
+        round_tile(hdc, r, fill, c(0x0A, 0x84, 0xFF), 3.0, 6.0, s);
     } else {
-        c(0x98, 0x9F, 0xA8)
-    };
-    // 注意：这里是在 4 倍超采样位图上作画，线宽必须跟着 s 放大，
-    // 否则缩回原尺寸后只剩 0.25 个像素，白块之类的浅色就分辨不出来
-    let pen = CreatePen(
-        PS_SOLID,
-        if selected {
-            (3.0 * s) as i32
-        } else {
-            (1.0 * s) as i32
-        }
-        .max(1),
-        pen_c,
-    );
-    let old = SelectObject(hdc, HGDIOBJ(pen.0));
-    let ob = SelectObject(hdc, GetStockObject(NULL_BRUSH));
-    Rectangle(hdc, r.left, r.top, r.right, r.bottom);
-    SelectObject(hdc, ob);
-    SelectObject(hdc, old);
-    DeleteObject(HGDIOBJ(pen.0));
-    let _ = s;
-}
-
-unsafe fn draw_symbol(hdc: HDC, r: RECT, kind: &str, s: f32) {
-    let b = CreateSolidBrush(c(0xF0, 0xF1, 0xF3));
-    FillRect(hdc, &r, b);
-    DeleteObject(HGDIOBJ(b.0));
-    let font = CreateFontW(
-        -((15.0 * s) as i32).max(11),
-        0,
-        0,
-        0,
-        700,
-        0,
-        0,
-        0,
-        DEFAULT_CHARSET.0 as u32,
-        0,
-        0,
-        0,
-        0,
-        w!("Segoe UI"),
-    );
-    let old_font = SelectObject(hdc, HGDIOBJ(font.0));
-    SetBkMode(hdc, TRANSPARENT);
-    SetTextColor(hdc, c(0x1C, 0x1C, 0x1E));
-    let mut wide: Vec<u16> = kind.encode_utf16().collect();
-    wide.push(0);
-    let mut rr = r;
-    DrawTextW(hdc, &mut wide, &mut rr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-    SelectObject(hdc, old_font);
-    DeleteObject(HGDIOBJ(font.0));
+        round_tile(hdc, r, fill, c(0xB7, 0xBC, 0xC3), 1.0, 6.0, s);
+    }
 }
 
 /// 画一支斜放的红底铅笔当主图标
@@ -515,6 +478,15 @@ unsafe fn paint_content(
     FillRect(hdc, &rc, bg);
     DeleteObject(HGDIOBJ(bg.0));
 
+    // 面板整体一圈细边框：白色背景下让工具条有个清晰的外轮廓（PixPin 同款）
+    let border_r = rect(
+        rc.left + (s as i32),
+        rc.top + (s as i32),
+        (rc.right - rc.left) - (s as i32) * 2,
+        (rc.bottom - rc.top) - (s as i32) * 2,
+    );
+    round_tile(hdc, border_r, c(0xFF, 0xFF, 0xFF), c(0xDD, 0xE0, 0xE5), 1.0, 14.0, s);
+
     if !EXPANDED {
         // 收纳态：把主图标画在一个「和展开态按钮同样大」的居中方块里。
         // 之前是直接铺满整个收纳窗口，图标比展开态大一圈，切换时看着像往下跳。
@@ -525,18 +497,6 @@ unsafe fn paint_content(
         let r = rect((w - side) / 2, (h - side) / 2, side, side);
         draw_pencil(hdc, r, s);
         return;
-    }
-
-    // 上下两行之间画一条浅灰分隔线
-    unsafe {
-        let pad = PAD * s;
-        let sep_y = pad + BTN * s + ROW_GAP * s / 2.0;
-        let pen = CreatePen(PS_SOLID, ((1.0 * s) as i32).max(1), c(0xDC, 0xDF, 0xE4));
-        let old = SelectObject(hdc, HGDIOBJ(pen.0));
-        MoveToEx(hdc, pad as i32, sep_y as i32, None);
-        LineTo(hdc, rc.right - pad as i32, sep_y as i32);
-        SelectObject(hdc, old);
-        DeleteObject(HGDIOBJ(pen.0));
     }
 
     let (_, _, items) = layout(s);
@@ -571,7 +531,7 @@ unsafe fn paint_content(
                     draw_width_preview(hdc, r, width, color, s)
                 }
             }
-            Action::Slider => draw_slider(hdc, r, width, s),
+            Action::Slider => draw_slider(hdc, r, width, color, s),
             Action::Separator => {
                 let pen = CreatePen(PS_SOLID, ((1.0 * s) as i32).max(1), c(0xDC, 0xDF, 0xE4));
                 let old = SelectObject(hdc, HGDIOBJ(pen.0));
