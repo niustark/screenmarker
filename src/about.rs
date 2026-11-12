@@ -383,7 +383,7 @@ pub fn show(hinstance: HINSTANCE) {
         let hwnd = CreateWindowExW(
             exstyle,
             class_name,
-            w!("关于 屏幕标注"),
+            w!("关于"),
             style,
             x,
             y,
