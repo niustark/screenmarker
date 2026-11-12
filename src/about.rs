@@ -15,7 +15,7 @@ use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::Graphics::GdiPlus::{
     GdipCreateBitmapFromStream, GdipCreateFromHDC, GdipDeleteGraphics, GdipDisposeImage,
-    GdipDrawImageRectI, GdipSetInterpolationMode, GdiplusShutdown, GdiplusStartup,
+    GdipDrawImageRectI, GdipSetInterpolationMode, GdiplusStartup,
     GdiplusStartupInput, GpBitmap, GpGraphics, GpImage, InterpolationModeHighQualityBicubic,
 };
 use windows::Win32::System::Com::StructuredStorage::CreateStreamOnHGlobal;

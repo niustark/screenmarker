@@ -4,7 +4,6 @@
 // 编译链上多一个外部依赖就多一个出错点。include_bytes! + 运行时解析更稳，
 // 且 exe 仍然是单文件。
 
-use windows::core::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 const ICO: &[u8] = include_bytes!("../app.ico");

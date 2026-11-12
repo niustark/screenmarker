@@ -41,6 +41,46 @@ static mut WIN_W: i32 = 0;
 static mut WIN_H: i32 = 0;
 
 static mut TIP_HWND: usize = 0;
+
+// 4 倍超采样位图缓存。WM_PAINT 每次都 CreateCompatibleBitmap(w*4,h*4)
+// 会反复分配/释放好几 MB；窗口尺寸不变时（展开/收纳切换时才变）直接复用。
+static mut SS_DC: isize = 0;
+static mut SS_BMP: isize = 0;
+static mut SS_OLD: isize = 0;
+static mut SS_W: i32 = 0;
+static mut SS_H: i32 = 0;
+
+unsafe fn ss_release() {
+    if SS_DC != 0 {
+        SelectObject(
+            HDC(SS_DC as *mut core::ffi::c_void),
+            HGDIOBJ(SS_OLD as *mut core::ffi::c_void),
+        );
+        DeleteObject(HGDIOBJ(SS_BMP as *mut core::ffi::c_void));
+        DeleteDC(HDC(SS_DC as *mut core::ffi::c_void));
+        SS_DC = 0;
+        SS_BMP = 0;
+        SS_OLD = 0;
+        SS_W = 0;
+        SS_H = 0;
+    }
+}
+
+/// 取得（必要时重建）超采样用的内存 DC
+unsafe fn ss_surface(hdc: HDC, w: i32, h: i32) -> HDC {
+    if SS_DC == 0 || SS_W != w || SS_H != h {
+        ss_release();
+        let mdc = CreateCompatibleDC(hdc);
+        let bmp = CreateCompatibleBitmap(hdc, w, h);
+        let old = SelectObject(mdc, HGDIOBJ(bmp.0));
+        SS_DC = mdc.0 as isize;
+        SS_BMP = bmp.0 as isize;
+        SS_OLD = old.0 as isize;
+        SS_W = w;
+        SS_H = h;
+    }
+    HDC(SS_DC as *mut core::ffi::c_void)
+}
 const TIP_TEXT: &str = "点击或按右侧 Ctrl 键展开工具条";
 /// WM_MOUSELEAVE（0x02A3）：windows 0.58 把它藏在未启用的 UI::Controls feature 里，
 /// 这里必须自定义；漏了的话 match 模式会退化为变量绑定（匹配一切），
@@ -114,6 +154,17 @@ fn rect(x: i32, y: i32, w: i32, h: i32) -> RECT {
         right: x + w,
         bottom: y + h,
     }
+}
+
+/// 接近纯白的颜色：白底调参区里的预览线 / 滑块填充 / 文字预览会完全看不见，
+/// 需要额外衬一层深灰描边才看得出（同时仍能看出「选的是白色」）。
+fn is_pale(color: Color) -> bool {
+    color.red() >= 235 && color.green() >= 235 && color.blue() >= 235
+}
+
+/// 浅色内容在白底上的衬底色
+fn ink_shadow() -> COLORREF {
+    c(0x8A, 0x90, 0x98)
 }
 
 fn hit(r: &RECT, x: i32, y: i32) -> bool {
@@ -285,6 +336,22 @@ unsafe fn draw_width_preview(hdc: HDC, r: RECT, width: f32, color: Color, s: f32
     // 这里压到 0.55 倍：仍然单调地反映粗细，又不会顶满格子
     let max_pw = (r.bottom - r.top - (6.0 * s) as i32).max(1);
     let pw = ((width * s * 0.55) as i32).clamp(1, max_pw);
+
+    // 白色（近白）线在白瓷砖上会完全消失：先画一条稍粗的灰衬底线，
+    // 再把真实颜色的线压在上层，白线就有了深色轮廓，仍能看出选的是白色。
+    if is_pale(color) {
+        let halo = CreatePen(
+            PS_SOLID,
+            pw + ((2.0 * s) as i32).max(2),
+            ink_shadow(),
+        );
+        let oh = SelectObject(hdc, HGDIOBJ(halo.0));
+        MoveToEx(hdc, r.left + pad, cy, None);
+        LineTo(hdc, r.right - pad, cy);
+        SelectObject(hdc, oh);
+        DeleteObject(HGDIOBJ(halo.0));
+    }
+
     let pen = CreatePen(PS_SOLID, pw, c(color.red(), color.green(), color.blue()));
     let old = SelectObject(hdc, HGDIOBJ(pen.0));
     MoveToEx(hdc, r.left + pad, cy, None);
@@ -317,11 +384,19 @@ unsafe fn draw_text_preview(hdc: HDC, r: RECT, font_size: f32, color: Color, s: 
     );
     let old_font = SelectObject(hdc, HGDIOBJ(font.0));
     SetBkMode(hdc, TRANSPARENT);
-    SetTextColor(hdc, c(color.red(), color.green(), color.blue()));
     let mut wide: Vec<u16> = "A".encode_utf16().collect();
     wide.push(0);
+    let flags = DT_CENTER | DT_VCENTER | DT_SINGLELINE;
+    // 白色「A」在白底上看不见：先偏移一点画一层灰影，再叠上真实颜色
+    if is_pale(color) {
+        let d = (1.4 * s) as i32;
+        let mut shade = rect(r.left + d, r.top + d, r.right - r.left, r.bottom - r.top);
+        SetTextColor(hdc, ink_shadow());
+        DrawTextW(hdc, &mut wide, &mut shade, flags);
+    }
+    SetTextColor(hdc, c(color.red(), color.green(), color.blue()));
     let mut rr = r;
-    DrawTextW(hdc, &mut wide, &mut rr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    DrawTextW(hdc, &mut wide, &mut rr, flags);
     SelectObject(hdc, old_font);
     DeleteObject(HGDIOBJ(font.0));
 }
@@ -343,6 +418,20 @@ unsafe fn draw_slider(hdc: HDC, r: RECT, width: f32, color: Color, s: f32) {
     let t = ((width - W_MIN) / (W_MAX - W_MIN)).clamp(0.0, 1.0);
     let kx = x0 + (((x1 - x0) as f32) * t) as i32;
     let col = c(color.red(), color.green(), color.blue());
+    let pale = is_pale(color);
+
+    // 白色填充段在白瓷砖上会消失：先给整条轨道铺一层稍厚的灰衬底，
+    // 白色段压在浅灰轨道上就能分辨出来。
+    if pale {
+        let halo = CreateSolidBrush(c(0xA8, 0xAE, 0xB6));
+        let d = ((1.0 * s) as i32).max(1);
+        FillRect(
+            hdc,
+            &rect(x0 - d, cy - th / 2 - d, (x1 - x0).max(1) + d * 2, th + d * 2),
+            halo,
+        );
+        DeleteObject(HGDIOBJ(halo.0));
+    }
 
     // 轨道底色
     let track = CreateSolidBrush(c(0xDC, 0xDF, 0xE4));
@@ -356,10 +445,11 @@ unsafe fn draw_slider(hdc: HDC, r: RECT, width: f32, color: Color, s: f32) {
         DeleteObject(HGDIOBJ(fg.0));
     }
 
-    // 圆点：白底 + 当前颜色描边
+    // 圆点：白底 + 当前颜色描边（白色时改用灰描边，否则圆点会消失）
     let knob = ((13.0 * s) as i32).max(8);
     let white = CreateSolidBrush(c(0xFF, 0xFF, 0xFF));
-    let pen = CreatePen(PS_SOLID, ((2.0 * s) as i32).max(1), col);
+    let ring = if pale { ink_shadow() } else { col };
+    let pen = CreatePen(PS_SOLID, ((2.0 * s) as i32).max(1), ring);
     let ob = SelectObject(hdc, HGDIOBJ(white.0));
     let op = SelectObject(hdc, HGDIOBJ(pen.0));
     Ellipse(hdc, kx - knob / 2, cy - knob / 2, kx + knob / 2, cy + knob / 2);
@@ -580,8 +670,6 @@ unsafe extern "system" fn tip_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lpar
             let hdc = BeginPaint(hwnd, &mut ps);
             let mut rc = RECT::default();
             GetClientRect(hwnd, &mut rc);
-            let w = (rc.right - rc.left).max(1);
-            let h = (rc.bottom - rc.top).max(1);
 
             // 深色半透明气泡底
             let bg = CreateSolidBrush(c(0x24, 0x24, 0x27));
@@ -701,17 +789,12 @@ unsafe extern "system" fn toolbar_wndproc(
             // 再用 HALFTONE 平均采样缩回原尺寸 —— 等于手工做了抗锯齿，
             // 图标边缘和小数字都不会再有锯齿。
             const SS: i32 = 4;
-            let mdc = CreateCompatibleDC(hdc);
-            let bmp = CreateCompatibleBitmap(hdc, w * SS, h * SS);
-            let old_bmp = SelectObject(mdc, HGDIOBJ(bmp.0));
+            let mdc = ss_surface(hdc, w * SS, h * SS);
             paint_content(mdc, rect(0, 0, w * SS, h * SS), SCALE * SS as f32, state_ptr);
             let old_mode = SetStretchBltMode(hdc, HALFTONE);
             let _ = SetBrushOrgEx(hdc, 0, 0, None);
             let _ = StretchBlt(hdc, 0, 0, w, h, mdc, 0, 0, w * SS, h * SS, SRCCOPY);
             SetStretchBltMode(hdc, STRETCH_BLT_MODE(old_mode));
-            SelectObject(mdc, old_bmp);
-            DeleteObject(HGDIOBJ(bmp.0));
-            DeleteDC(mdc);
 
             EndPaint(hwnd, &ps);
             LRESULT(0)
@@ -894,7 +977,10 @@ unsafe extern "system" fn toolbar_wndproc(
             }
             LRESULT(0)
         }
-        WM_DESTROY => LRESULT(0),
+        WM_DESTROY => {
+            ss_release();
+            LRESULT(0)
+        }
         _ => DefWindowProcW(hwnd, msg, wparam, lparam),
     }
 }

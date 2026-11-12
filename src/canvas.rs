@@ -21,7 +21,6 @@ use std::rc::Rc;
 use windows::core::*;
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::*;
-use windows::Win32::System::SystemServices::MK_LBUTTON;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetCapture, GetKeyState, ReleaseCapture, SetCapture, VK_SHIFT,
 };
@@ -721,7 +720,6 @@ unsafe extern "system" fn canvas_wndproc(
             if state_ptr.is_null() {
                 return LRESULT(0);
             }
-            let p = point_of(lparam);
             // 1) 折线正在画：右键 = 收尾，并选中刚画的那条。
             //    注意：折线最后一段是「最后一个顶点 → 光标」的橡皮筋，右键收尾时
             //    若光标位置还没落成顶点（POLY_RUBBER 有值），要把那个点也收进去，
@@ -956,26 +954,22 @@ pub fn repaint(hwnd: HWND) {
             render_one(f, &preview);
             // 顶点小标记，方便看"下一点从哪出发"
             if let Some(last) = CURRENT_POLY.last() {
-                let b = unsafe {
-                    CreateSolidBrush(COLORREF(
-                        ((c.blue() as u32) << 16) | ((c.green() as u32) << 8) | c.red() as u32,
-                    ))
-                };
+                let b = CreateSolidBrush(COLORREF(
+                    ((c.blue() as u32) << 16) | ((c.green() as u32) << 8) | c.red() as u32,
+                ));
                 let d = 8.0;
-                unsafe {
-                    let old = SelectObject(f.dc(), HGDIOBJ(b.0));
-                    let op = SelectObject(f.dc(), GetStockObject(NULL_PEN));
-                    Ellipse(
-                        f.dc(),
-                        (last.x - d / 2.0) as i32,
-                        (last.y - d / 2.0) as i32,
-                        (last.x + d / 2.0) as i32,
-                        (last.y + d / 2.0) as i32,
-                    );
-                    SelectObject(f.dc(), op);
-                    SelectObject(f.dc(), old);
-                    let _ = DeleteObject(HGDIOBJ(b.0));
-                }
+                let old = SelectObject(f.dc(), HGDIOBJ(b.0));
+                let op = SelectObject(f.dc(), GetStockObject(NULL_PEN));
+                Ellipse(
+                    f.dc(),
+                    (last.x - d / 2.0) as i32,
+                    (last.y - d / 2.0) as i32,
+                    (last.x + d / 2.0) as i32,
+                    (last.y + d / 2.0) as i32,
+                );
+                SelectObject(f.dc(), op);
+                SelectObject(f.dc(), old);
+                let _ = DeleteObject(HGDIOBJ(b.0));
             }
         }
 
@@ -2202,9 +2196,7 @@ fn mosaic_create(st: &mut AppState, p: Point) -> usize {
             pixmap_h: 0,
         });
         let idx = st.shapes.len() - 1;
-        unsafe {
-            ACTIVE_MOSAIC = idx;
-        }
+        ACTIVE_MOSAIC = idx;
         idx
     }
 }

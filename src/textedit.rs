@@ -452,7 +452,7 @@ pub fn open_watermark(hinstance: HINSTANCE, initial: &str, state: Rc<RefCell<App
         TE_EDIT = edit;
         TE_OPEN_AT = Some(std::time::Instant::now());
         EDIT_OLD_PROC =
-            SetWindowLongPtrW(edit, GWLP_WNDPROC, edit_proc as usize as isize);
+            SetWindowLongPtrW(edit, GWLP_WNDPROC, edit_proc as *const () as isize);
 
         let font = CreateFontW(
             -((18.0 * s) as i32).max(12),
@@ -579,7 +579,7 @@ pub fn open(
         EDIT_OLD_PROC = SetWindowLongPtrW(
             edit,
             GWLP_WNDPROC,
-            edit_proc as usize as isize,
+            edit_proc as *const () as isize,
         );
 
         // 字号跟当前设置的「粗细」联动（canvas::text_size 是唯一来源，

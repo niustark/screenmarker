@@ -66,12 +66,6 @@ impl Renderer {
         unsafe { CreateSolidBrush(Self::gdi_color(self.col(c))) }
     }
 
-    pub fn draw_shapes(&self, shapes: &[Shape], screen_w: i32, screen_h: i32) {
-        for sh in shapes {
-            let _ = self.draw_shape(sh, screen_w, screen_h);
-        }
-    }
-
     fn line(&self, pen: HPEN, p1: Point, p2: Point) {
         unsafe {
             let old = SelectObject(self.hdc, HGDIOBJ(pen.0));
@@ -966,7 +960,7 @@ pub fn capture_screen(x: i32, y: i32, w: i32, h: i32) -> Option<(Vec<u8>, i32, i
         let hdc_mem = CreateCompatibleDC(hdc_screen);
         let bmp = CreateCompatibleBitmap(hdc_screen, w, h);
         let old = SelectObject(hdc_mem, HGDIOBJ(bmp.0));
-        BitBlt(hdc_mem, 0, 0, w, h, hdc_screen, x, y, SRCCOPY);
+        let blt_ok = BitBlt(hdc_mem, 0, 0, w, h, hdc_screen, x, y, SRCCOPY).is_ok();
         let mut bi = BITMAPINFO {
             bmiHeader: BITMAPINFOHEADER {
                 biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
@@ -980,7 +974,7 @@ pub fn capture_screen(x: i32, y: i32, w: i32, h: i32) -> Option<(Vec<u8>, i32, i
             bmiColors: [RGBQUAD::default(); 1],
         };
         let mut data = vec![0u8; (w * h * 4) as usize];
-        GetDIBits(
+        let lines = GetDIBits(
             hdc_mem,
             bmp,
             0,
@@ -993,6 +987,10 @@ pub fn capture_screen(x: i32, y: i32, w: i32, h: i32) -> Option<(Vec<u8>, i32, i
         DeleteObject(HGDIOBJ(bmp.0));
         DeleteDC(hdc_mem);
         ReleaseDC(None, hdc_screen);
+        // 失败时返回 None，别把一张全黑的位图当快照交给马赛克/放大镜
+        if !blt_ok || lines == 0 {
+            return None;
+        }
         Some((data, w, h))
     }
 }

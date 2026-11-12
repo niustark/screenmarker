@@ -205,8 +205,12 @@ impl Frame {
                     *p = full;
                     continue;
                 }
-                // 快路径 2：本来就是透明背景，没什么可做的
-                if *p == BG_PIXEL {
+                // 快路径 2：本来就是透明背景，没什么可做的。
+                // BG_PIXEL = alpha 1（绘图态的「可点击但不可见」背景）；
+                // BG_RGB   = alpha 0（穿透态的真透明背景）。
+                // 后者若不跳过，下面会算出 t≈0 并把它写成 BG_PIXEL(alpha 1)，
+                // 于是整片空白变成「可点击」，点击穿透就失效了。
+                if *p == BG_PIXEL || *p == BG_RGB {
                     continue;
                 }
                 let ch = [
@@ -243,8 +247,12 @@ impl Frame {
                 }
                 let t = (sum / n as f32).clamp(0.0, 1.0);
                 if t < 0.04 {
-                    // 覆盖度几乎为零：还原成透明背景，免得被 fix_alpha 提成不透明
-                    *p = BG_PIXEL;
+                    // 覆盖度几乎为零：还原成透明背景，免得被 fix_alpha 提成不透明。
+                    // 保留原像素的 alpha（0=穿透态 / 1=绘图态），别一律写成 1，
+                    // 否则穿透态下这些空白又会重新拦住鼠标。
+                    // 只保留「原本就是真透明」的 alpha=0，其余一律恢复成绘图态的
+                    // alpha=1（和旧行为一致，避免影响 GDI+ 抗锯齿像素）。
+                    *p = if (*p >> 24) == 0 { BG_RGB } else { BG_PIXEL };
                 } else {
                     let a = (alpha as f32 * t).round().clamp(1.0, 255.0) as u32;
                     // UpdateLayeredWindow 用的是 AC_SRC_ALPHA（预乘 alpha）：
@@ -303,5 +311,33 @@ impl Drop for Frame {
             DeleteDC(self.mem_dc);
             ReleaseDC(None, self.hdc_screen);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 回归：穿透态背景是 alpha=0 的 BG_RGB。resolve() 早期曾把这类像素
+    /// 当成「t≈0 的混合像素」写成 BG_PIXEL(alpha=1)，导致整片空白重新
+    /// 拦住鼠标、点击穿透失效。有荧光笔/水印/AA 图形时必现。
+    #[test]
+    fn transparent_bg_survives_magic_resolve() {
+        let f = Frame::new(64, 64).expect("Frame::new 失败");
+        f.clear_transparent();
+        // 模拟 GDI 画上去的占位色像素（GDI 不写 alpha，所以仍是 0）
+        f.pixels()[32 * 64 + 32] = px_of(MAGIC);
+        f.convert_magic((0.0, 0.0, 64.0, 64.0), (255, 0, 0), 128);
+        assert_eq!(f.alpha_at(10, 10), 0, "穿透态空白必须保持 alpha=0");
+        assert!(f.alpha_at(32, 32) >= 100, "占位色应转成带色半透明像素");
+    }
+
+    /// 绘图态背景是 alpha=1 的 BG_PIXEL，要继续保持可点击。
+    #[test]
+    fn drawing_bg_stays_clickable() {
+        let f = Frame::new(64, 64).expect("Frame::new 失败");
+        f.clear();
+        f.convert_magic((0.0, 0.0, 64.0, 64.0), (255, 0, 0), 128);
+        assert_eq!(f.alpha_at(10, 10), 1, "绘图态空白保持 alpha=1");
     }
 }

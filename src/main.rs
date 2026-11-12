@@ -3,6 +3,14 @@
 
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+// Win32 GUI 程序里绝大多数 GDI / 窗口 API 的返回值（BOOL、Result）只是成功标志，
+// 逐个 `let _ =` 会把代码淹没在噪声里。关键调用（托盘图标、屏幕快照、
+// 图层提交）在各自位置显式检查，其余统一允许忽略。
+#![allow(unused_must_use)]
+// 本程序是单线程消息循环，模块级 static mut 承载 UI 状态，不存在并发访问。
+// 将来升级到 edition 2024 前需要改成 thread_local! / UnsafeCell。
+#![allow(static_mut_refs)]
+
 mod shape;
 mod render;
 mod frame;
@@ -94,13 +102,20 @@ fn main() -> Result<()> {
         };
         let tip: Vec<u16> = "屏幕标注\0".encode_utf16().collect();
         nid.szTip[..tip.len()].copy_from_slice(&tip);
-        Shell_NotifyIconW(NIM_ADD, &nid);
+        if !Shell_NotifyIconW(NIM_ADD, &nid).as_bool() {
+            dbg::log("托盘图标添加失败（不影响画布，右键菜单入口会缺失）");
+        }
 
-        // 消息循环
+        // 消息循环。GetMessageW 返回 BOOL：>0 正常、0 = WM_QUIT、-1 = 出错。
+        // 旧的 `.as_bool()` 会把 -1 也当成 true，出错时拿着脏 MSG 空转。
         let mut msg = MSG::default();
-        while GetMessageW(&mut msg, None, 0, 0).as_bool() {
+        loop {
+            let r = GetMessageW(&mut msg, None, 0, 0);
+            if r.0 <= 0 {
+                break;
+            }
             // 文字编辑框用自绘窗口，直接走默认处理
-            TranslateMessage(&msg);
+            let _ = TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
 
