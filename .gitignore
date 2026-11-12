@@ -1,6 +1,9 @@
 # 编译产物
 /target/
 
+# 编译出的可执行文件（通过 GitHub Releases 发布，不入库）
+/screenmarker.exe
+
 # 调试日志
 dbg*.log
 
