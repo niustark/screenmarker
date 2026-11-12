@@ -30,7 +30,7 @@ static mut DEL_LATCH: bool = false;
 // 上一次「按下」的时间戳（KBDLLHOOKSTRUCT.time，毫秒）。
 // 低级钩子在主线程里跑，一旦某次处理超时（比如正好在整屏重绘），
 // 系统会跳过那一批事件 —— keyup 被吞掉后闩锁就再也回不到 false，
-// 表现就是「按空格没反应，只能点主图标」。用时间间隔兜底：
+// 表现就是「按右侧 Ctrl 没反应，只能点主图标」。用时间间隔兜底：
 // 距上次按下超过 800ms 必然是新手势（长按的自动重复间隔远小于这个值）。
 static mut SPACE_LAST: u32 = 0;
 static mut ESC_LAST: u32 = 0;
@@ -45,6 +45,10 @@ const VK_SPACE: u32 = 0x20;
 const VK_ESCAPE: u32 = 0x1B;
 const VK_DELETE: u32 = 0x2E;
 const VK_BACK: u32 = 0x08;
+// 右侧 Ctrl：全局展开/折叠工具条（替代原来的空格）。
+// 注意用 VK_RCONTROL 而非 VK_CONTROL，只认「右侧」那一颗，
+// 左侧 Ctrl 仍留给 Ctrl+C/V 等常规组合键，互不干扰。
+const VK_RCTRL: u32 = 0xA3;
 
 /// 这个窗口的类名是不是 name（不区分大小写）
 unsafe fn class_is(h: HWND, name: &str) -> bool {
@@ -183,21 +187,20 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
             DEL_LATCH = false;
         }
 
-        // 空格：收纳 / 展开工具条
-        // 正在打字时必须让路：编辑框要收到空格本身（中文输入法还要靠空格选字），
-        // 而不是让工具条折叠。判据用「光标是否落在任意输入框里」。
-        // 穿透态（退出工具、保留画面、空白穿透）下空格也不触发：
-        // 用户已经回到正常使用电脑，必须点主图标才能重新激活标注。
-        if is_down && kb.vkCode == VK_SPACE && !state_ptr.is_null() {
-            if keyboard_owned_by_edit() || crate::canvas::is_click_through() {
-                // 输入框里的空格不属于我们：既不碰工具条，也不更新长按闩锁/时间戳。
-                // 否则打字时连打几个空格会污染 SPACE_LAST，离开输入框后紧接着
-                // 想用空格收工具条，就可能被误判成「按住不放的自动重复」而失灵。
-                SPACE_LATCH = false;
-            } else {
-                // 我们自己的窗口都是 WS_EX_NOACTIVATE，几乎永远不是前台；
-                // 因此不能用「前台是本进程」当闸门（那会让退出标注后空格彻底失灵）。
-                // 只要键盘没被输入框占用，空格就是「收纳/展开工具条」。
+        // 右侧 Ctrl：收纳 / 展开工具条（替代原来的空格）
+        // 与空格不同，右侧 Ctrl 是修饰键，本身不会往输入框里输入字符，
+        // 所以不需要 keyboard_owned_by_edit() 让路；但要防止它作为 Ctrl+C/V
+        // 等组合键的一部分时误触发 —— 只有「单独按下右侧 Ctrl」才算数。
+        if is_down && kb.vkCode == VK_RCTRL && !state_ptr.is_null() {
+            // 组合键判定：除了右侧 Ctrl 自身，其他修饰键（Shift/Alt/左Ctrl/Win）
+            // 或任何主键区按键正在按下时，都视为组合键，不触发工具条。
+            let alone = !crate::canvas::is_click_through()
+                && (GetAsyncKeyState(VK_SHIFT.0 as i32) as u16 & 0x8000) == 0
+                && (GetAsyncKeyState(VK_MENU.0 as i32) as u16 & 0x8000) == 0
+                && (GetAsyncKeyState(VK_LCONTROL.0 as i32) as u16 & 0x8000) == 0
+                && (GetAsyncKeyState(VK_LWIN.0 as i32) as u16 & 0x8000) == 0
+                && (GetAsyncKeyState(VK_RWIN.0 as i32) as u16 & 0x8000) == 0;
+            if alone {
                 let fresh = is_fresh(SPACE_LATCH, SPACE_LAST, kb.time);
                 SPACE_LAST = kb.time;
                 if fresh {
@@ -205,6 +208,9 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
                     let _ = (canvas_hwnd, toolbar_hwnd);
                     crate::toolbar::toggle_collapse();
                 }
+            } else {
+                // 组合键中的右侧 Ctrl 不属于我们：不碰工具条，也不更新闩锁。
+                SPACE_LATCH = false;
             }
         }
 

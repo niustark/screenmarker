@@ -26,7 +26,10 @@ use windows::core::*;
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::UI::HiDpi::GetDpiForSystem;
-use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture};
+use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    ReleaseCapture, SetCapture, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
+};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 pub static mut TOOLBAR_STATE_PTR: usize = 0;
@@ -36,6 +39,13 @@ static mut EXPANDED: bool = false;
 static mut SCALE: f32 = 1.0;
 static mut WIN_W: i32 = 0;
 static mut WIN_H: i32 = 0;
+
+static mut TIP_HWND: usize = 0;
+const TIP_TEXT: &str = "点击或按右侧 Ctrl 键展开工具条";
+/// WM_MOUSELEAVE（0x02A3）：windows 0.58 把它藏在未启用的 UI::Controls feature 里，
+/// 这里必须自定义；漏了的话 match 模式会退化为变量绑定（匹配一切），
+/// 把 WM_NCCREATE 也吞掉返回 0，导致工具条窗口创建失败（句柄无效）。
+const WM_MOUSELEAVE: u32 = 0x02A3;
 
 const ID_EXIT: usize = 1;
 
@@ -602,6 +612,118 @@ unsafe fn apply_round_region(hwnd: HWND, w: i32, h: i32) {
     let _ = SetWindowRgn(hwnd, rgn, true);
 }
 
+// ---------- 折叠态悬浮提示 ----------
+
+/// tooltip 窗口过程：只负责把提示文字画成深色圆角气泡。
+unsafe extern "system" fn tip_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    match msg {
+        WM_PAINT => {
+            let mut ps = PAINTSTRUCT::default();
+            let hdc = BeginPaint(hwnd, &mut ps);
+            let mut rc = RECT::default();
+            GetClientRect(hwnd, &mut rc);
+            let w = (rc.right - rc.left).max(1);
+            let h = (rc.bottom - rc.top).max(1);
+
+            // 深色半透明气泡底
+            let bg = CreateSolidBrush(c(0x24, 0x24, 0x27));
+            FillRect(hdc, &rc, bg);
+            DeleteObject(HGDIOBJ(bg.0));
+
+            // 白字提示，微软雅黑
+            let fs = (13.0 * SCALE) as i32;
+            let font = CreateFontW(
+                -fs.max(12),
+                0, 0, 0, 400, 0, 0, 0,
+                DEFAULT_CHARSET.0 as u32, 0, 0, 0, 0,
+                w!("Microsoft YaHei"),
+            );
+            let old_font = SelectObject(hdc, HGDIOBJ(font.0));
+            SetBkMode(hdc, TRANSPARENT);
+            SetTextColor(hdc, c(0xFF, 0xFF, 0xFF));
+            let mut wide: Vec<u16> = TIP_TEXT.encode_utf16().collect();
+            wide.push(0);
+            let mut rr = rc;
+            let pad = (10.0 * SCALE) as i32;
+            rr.left += pad;
+            rr.right -= pad;
+            DrawTextW(hdc, &mut wide, &mut rr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            SelectObject(hdc, old_font);
+            DeleteObject(HGDIOBJ(font.0));
+
+            EndPaint(hwnd, &ps);
+            LRESULT(0)
+        }
+        WM_ERASEBKGND => LRESULT(1),
+        _ => DefWindowProcW(hwnd, msg, wparam, lparam),
+    }
+}
+
+/// 折叠态下鼠标悬停主图标时显示提示；鼠标移出/展开后隐藏。
+unsafe fn show_tip() {
+    if TIP_HWND != 0 {
+        return; // 已显示
+    }
+    let hinst: HINSTANCE = GetModuleHandleW(None).unwrap_or_default().into();
+
+    // 按文字长度估算气泡宽度
+    let fs = (13.0 * SCALE) as i32;
+    let text_w = (TIP_TEXT.chars().count() as i32) * fs + (24.0 * SCALE) as i32;
+    let w = text_w.max(120);
+    let h = (30.0 * SCALE) as i32;
+
+    // 定位：折叠图标正上方居中，留一点间距
+    let tb = HWND(TOOLBAR_HWND as *mut _);
+    let mut r = RECT::default();
+    GetWindowRect(tb, &mut r);
+    let x = (r.left + r.right) / 2 - w / 2;
+    let y = r.top - h - (6.0 * SCALE) as i32;
+
+    let class_name = w!("ScreenMarkerTip");
+    let wc = WNDCLASSW {
+        lpfnWndProc: Some(tip_wndproc),
+        hInstance: hinst,
+        hbrBackground: HBRUSH(ptr::null_mut()),
+        lpszClassName: class_name,
+        ..Default::default()
+    };
+    RegisterClassW(&wc);
+
+    let hwnd = match CreateWindowExW(
+        WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+        class_name,
+        w!("ScreenMarkerTip"),
+        WS_POPUP,
+        x,
+        y,
+        w,
+        h,
+        None,
+        None,
+        hinst,
+        None,
+    ) {
+        Ok(h) => h,
+        Err(_) => return,
+    };
+    TIP_HWND = hwnd.0 as usize;
+    SetLayeredWindowAttributes(hwnd, COLORREF(0), 235, LWA_ALPHA);
+    apply_round_region(hwnd, w, h);
+    ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+    UpdateWindow(hwnd);
+}
+
+/// 隐藏并销毁折叠态提示。
+unsafe fn hide_tip() {
+    if TIP_HWND == 0 {
+        return;
+    }
+    let hwnd = HWND(TIP_HWND as *mut _);
+    let _ = DestroyWindow(hwnd);
+    TIP_HWND = 0;
+}
+
+
 // ---------- 窗口过程 ----------
 
 unsafe extern "system" fn toolbar_wndproc(
@@ -666,6 +788,11 @@ unsafe extern "system" fn toolbar_wndproc(
             }
             LRESULT(HTCAPTION as isize)
         }
+        WM_MOUSELEAVE => {
+            // 折叠态鼠标移出 → 隐藏提示
+            hide_tip();
+            LRESULT(0)
+        }
         WM_LBUTTONDOWN => {
             if !EXPANDED {
                 // 收纳态的主图标既能拖走、也能点开：先记下按下位置，
@@ -700,6 +827,17 @@ unsafe extern "system" fn toolbar_wndproc(
             LRESULT(0)
         }
         WM_MOUSEMOVE => {
+            // 折叠态：鼠标悬停时弹出提示，并追踪「移出」以便及时隐藏。
+            if !EXPANDED {
+                let mut tme = TRACKMOUSEEVENT {
+                    cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
+                    dwFlags: TME_LEAVE,
+                    hwndTrack: hwnd,
+                    dwHoverTime: 0,
+                };
+                let _ = TrackMouseEvent(&mut tme);
+                show_tip();
+            }
             if ICON_DOWN {
                 let mut pt = POINT::default();
                 GetCursorPos(&mut pt);
@@ -708,6 +846,8 @@ unsafe extern "system" fn toolbar_wndproc(
                 // 4px 以内当误触，避免手抖把「点开」判成「拖动」
                 if !ICON_DRAG && dx.abs() + dy.abs() > 4 {
                     ICON_DRAG = true;
+                    // 开始拖动：提示还悬在旧位置，先隐藏，松手后再悬停会重新弹出
+                    hide_tip();
                 }
                 if ICON_DRAG {
                     SetWindowPos(
@@ -984,7 +1124,7 @@ unsafe fn show_menu(hwnd: HWND) {
         Ok(m) => m,
         Err(_) => return,
     };
-    let _ = AppendMenuW(menu, MF_STRING, ID_EXIT, w!("退出屏幕标注"));
+    let _ = AppendMenuW(menu, MF_STRING, ID_EXIT, w!("退出"));
     let cmd = TrackPopupMenu(
         menu,
         TPM_RETURNCMD | TPM_RIGHTBUTTON,
