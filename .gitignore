@@ -4,16 +4,15 @@
 # 编译出的可执行文件（通过 GitHub Releases 发布，不入库）
 /screenmarker.exe
 
-# 调试日志
+# 调试日志（统一收纳在 logs/ 下）
 dbg*.log
+/logs/
 
 # 调试/测试临时脚本与截图（开发过程产物，非发布内容）
+# 注：构建链已全部 Rust 化，仓库里不再有 Python 脚本
 /_*.py
 /_*.png
 /_*.bat
-
-# 例外：_seticon.py 是构建链的图标兜底脚本，需要随仓库分发
-!/_seticon.py
 
 # 临时文件
 /1

@@ -1,9 +1,9 @@
 // 把 app.ico 作为 RT_GROUP_ICON 直接链接进 exe。
 //
-// 以前只在 build.bat 里用 _seticon.py 事后改 PE，一旦直接 `cargo build`
+// 以前只在 build.bat 里用 Python 脚本事后改 PE，一旦直接 `cargo build`
 // 就会重新链接、把图标资源丢掉（资源段变空，资源管理器显示默认图标）。
 // 这里在链接期就把 .res 交给链接器，任何构建方式都不会再丢。
-// 找不到 windres 时静默跳过，仍由 _seticon.py 兜底，不影响编译。
+// 找不到 windres 时静默跳过，由 build.bat 里的 Rust 工具 seticon 兜底，不影响编译。
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -43,5 +43,5 @@ fn main() {
             return;
         }
     }
-    println!("cargo:warning=windres 不可用：图标将由 build.bat 的 _seticon.py 在构建后写入");
+    println!("cargo:warning=windres 不可用：图标将由 build.bat 的 seticon (Rust) 在构建后写入");
 }
