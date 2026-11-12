@@ -9,6 +9,12 @@
 
 ---
 
+## 下载
+
+前往 [Releases](https://github.com/niustark/screenmarker/releases) 页面，下载最新的 `screenmarker.exe`（免安装，双击即用）。
+
+---
+
 ## 快速开始
 
 1. 双击运行 `screenmarker.exe`。
