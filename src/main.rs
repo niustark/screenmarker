@@ -1,4 +1,4 @@
-// 屏幕标注程序 —— Rust 完整版
+// 画屏点睛程序 —— Rust 完整版
 // 全屏透明画布 + 浮动工具条 + 系统托盘 + 全局快捷键
 
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
@@ -127,7 +127,7 @@ fn main() -> Result<()> {
         let tray_hwnd = CreateWindowExW(
             WINDOW_EX_STYLE::default(),
             tray_class,
-            w!("ScreenMarker"),
+            w!("画屏点睛"),
             WS_OVERLAPPED,
             0, 0, 0, 0,
             None, None, hinstance, None,
@@ -149,7 +149,7 @@ fn main() -> Result<()> {
         } else {
             ico
         };
-        let tip: Vec<u16> = "屏幕标注\0".encode_utf16().collect();
+        let tip: Vec<u16> = "画屏点睛\0".encode_utf16().collect();
         nid.szTip[..tip.len()].copy_from_slice(&tip);
         if !Shell_NotifyIconW(NIM_ADD, &nid).as_bool() {
             dbg::log("托盘图标添加失败（不影响画布，右键菜单入口会缺失）");

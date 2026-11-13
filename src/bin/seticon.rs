@@ -1,7 +1,6 @@
 //! 把 app.ico 的所有尺寸写进已编译 exe 的 PE 资源段（RT_ICON + RT_GROUP_ICON）。
 //!
-//! 这是原先 `_seticon.py` 的纯 Rust 等价实现，用系统官方支持的 UpdateResource
-//! 系列 API 直接改现成 PE，不需要 windres / rc.exe / Python。
+//! 用系统官方支持的 UpdateResource 系列 API 直接改现成 PE。
 //! `build.rs` 会在链接期用 windres 嵌入图标，本工具只作兜底；重复写入按 ID
 //! 覆盖，是幂等的，所以两条路径都走也没问题。
 //!

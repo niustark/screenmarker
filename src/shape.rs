@@ -144,7 +144,7 @@ pub enum Shape {
         center: Point,
         radius: f32,
     },
-    /// 放大镜：圆形取景框。画面内容来自「进屏幕标注时抓的整屏快照」，
+    /// 放大镜：圆形取景框。画面内容来自「进入标注时抓的整屏快照」，
     /// 由 canvas 全局保存一份，这里只记位置、半径和倍率。
     Magnifier {
         center: Point,

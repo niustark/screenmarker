@@ -231,7 +231,7 @@ unsafe extern "system" fn about_wndproc(
             let name_font = font(21, 700);
             let old_font = SelectObject(hdc, HGDIOBJ(name_font.0));
             SetTextColor(hdc, c(0x1C, 0x1C, 0x1E));
-            let mut name: Vec<u16> = "屏幕标注 ScreenMarker".encode_utf16().collect();
+            let mut name: Vec<u16> = "画屏点睛".encode_utf16().collect();
             name.push(0);
             let mut r1 = rect(
                 sc(16),
@@ -364,7 +364,7 @@ pub fn show(hinstance: HINSTANCE) {
         let style = WS_POPUP | WS_CAPTION | WS_SYSMENU;
         let exstyle = WS_EX_TOPMOST | WS_EX_TOOLWINDOW;
         // CreateWindowExW 的宽高是「含边框」的外框尺寸，先按客户区尺寸反推，
-        // 否则底部文字会被标题栏吃掉（旧版「GitHub 项目主页」就是这么被裁掉的）。
+        // 否则底部文字会被标题栏吃掉。
         let mut frame = RECT {
             left: 0,
             top: 0,
