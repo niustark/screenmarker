@@ -18,7 +18,7 @@
 ## 下载
 
 - **GitHub Releases（推荐）**：[github.com/niustark/screenmarker/releases](https://github.com/niustark/screenmarker/releases)
-- **蓝奏云（国内加速）**：[https://niu19.lanzoue.com/iVHJf4fuvaub](https://niu19.lanzoue.com/iVHJf4fuvaub)
+- **蓝奏云（国内加速）**：[https://niu19.lanzoue.com/b00b61a6ri](https://niu19.lanzoue.com/b00b61a6ri)　密码 `5ru5`
 
 下载 `ScreenMarker.exe`，免安装，双击即可运行。
 
