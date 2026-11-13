@@ -50,6 +50,32 @@ static mut SS_BMP: isize = 0;
 static mut SS_OLD: isize = 0;
 static mut SS_W: i32 = 0;
 static mut SS_H: i32 = 0;
+// 渲染内容签名：尺寸或「状态」变化时才会重画 paint_content，否则直接复用
+// 已缓存的 4x 位图（鼠标在工具条上移动不改变 tool/color/width，不应触发重画）。
+// 元组 = (展开?, tool 判别, 颜色, 线宽*100, 逻辑宽, 逻辑高)
+static mut TB_SIG: (u8, u8, u32, i32, i32, i32) = (0, 0, 0, 0, 0, 0);
+
+/// Tool 枚举没有 repr(u8)，转一个稳定判别值用于渲染签名
+fn tool_id(t: Tool) -> u8 {
+    match t {
+        Tool::None => 0,
+        Tool::Pen => 1,
+        Tool::Highlighter => 2,
+        Tool::Rectangle => 3,
+        Tool::Ellipse => 4,
+        Tool::Spotlight => 5,
+        Tool::Arrow => 6,
+        Tool::Polyline => 7,
+        Tool::Wavy => 8,
+        Tool::Magnifier => 9,
+        Tool::Text => 10,
+        Tool::Watermark => 11,
+        Tool::Number => 12,
+        Tool::Mosaic => 13,
+        Tool::Eraser => 14,
+        Tool::Select => 15,
+    }
+}
 
 unsafe fn ss_release() {
     if SS_DC != 0 {
@@ -504,7 +530,7 @@ unsafe fn slider_apply(hwnd: HWND, r: RECT, x: i32, state_ptr: *const RefCell<Ap
     canvas::sync_watermark();
     canvas::sync_text();
     canvas::sync_number();
-    canvas::repaint_global();
+    canvas::request_repaint_global();
     InvalidateRect(hwnd, None, true);
 }
 
@@ -820,7 +846,25 @@ unsafe extern "system" fn toolbar_wndproc(
             // 图标边缘和小数字都不会再有锯齿。
             const SS: i32 = 4;
             let mdc = ss_surface(hdc, w * SS, h * SS);
-            paint_content(mdc, rect(0, 0, w * SS, h * SS), SCALE * SS as f32, state_ptr);
+            // 状态签名：仅当尺寸或 tool/color/width 变化才重画内容，
+            // 否则直接复用已缓存的 4x 位图，避免每次 WM_PAINT 重光栅化所有按钮。
+            let sig = if state_ptr.is_null() {
+                (0u8, 0u8, 0u32, 0i32, w, h)
+            } else {
+                let st = (*state_ptr).borrow();
+                (
+                    EXPANDED as u8,
+                    tool_id(st.tool),
+                    st.color.0,
+                    (st.width * 100.0) as i32,
+                    w,
+                    h,
+                )
+            };
+            if unsafe { TB_SIG } != sig {
+                paint_content(mdc, rect(0, 0, w * SS, h * SS), SCALE * SS as f32, state_ptr);
+                TB_SIG = sig;
+            }
             let old_mode = SetStretchBltMode(hdc, HALFTONE);
             let _ = SetBrushOrgEx(hdc, 0, 0, None);
             let _ = StretchBlt(hdc, 0, 0, w, h, mdc, 0, 0, w * SS, h * SS, SRCCOPY);

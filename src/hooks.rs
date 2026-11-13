@@ -48,6 +48,52 @@ pub fn note_our_window_clicked() {
     unsafe { DEL_OWNED_BY_US = true; }
 }
 
+// ---------- 钩子动作的异步派发 ----------
+/// 低级钩子回调必须尽快返回：超时会让系统跳过事件、甚至悄悄摘掉钩子
+/// （表现就是「快捷键用着用着失效」）。回调里只做判定 + 闩锁，真正的动作
+/// 通过这条消息投给画布窗口，在窗口过程里执行 —— 整屏重绘、SetWindowPos、
+/// 跨进程 SendMessageTimeoutW(50ms)、写日志文件全部搬出钩子。
+pub const WM_APP_HOOK_ACTION: u32 = WM_APP + 2;
+
+pub const HOOK_TOGGLE: usize = 1;
+pub const HOOK_ESC: usize = 2;
+pub const HOOK_DELETE: usize = 3;
+pub const HOOK_WHEEL: usize = 4;
+
+#[inline]
+unsafe fn post_action(hwnd: HWND, action: usize, param: isize) {
+    if !hwnd.is_invalid() {
+        let _ = PostMessageW(hwnd, WM_APP_HOOK_ACTION, WPARAM(action), LPARAM(param));
+    }
+}
+
+/// 由画布窗口过程调用：执行钩子判定出的动作。
+pub fn dispatch(action: usize, param: isize) {
+    match action {
+        HOOK_TOGGLE => crate::toolbar::toggle_collapse(),
+        HOOK_ESC => unsafe {
+            // 问前台控件 WM_GETDLGCODE 最多 50ms，放在窗口过程里不会拖住钩子。
+            if !keyboard_owned_by_edit() {
+                crate::canvas::exit_markup();
+            }
+        },
+        HOOK_DELETE => {
+            crate::dbg::logf!("Del 动作 vk={param:#x}");
+            crate::canvas::delete_selected();
+        }
+        HOOK_WHEEL => {
+            // param bit0 = 向上滚，bit1 = Ctrl 按下
+            let up = param & 1 != 0;
+            let ctrl = param & 2 != 0;
+            crate::dbg::logf!("滚轮动作 up={up} ctrl={ctrl}");
+            if !canvas::handle_wheel(up, ctrl) {
+                crate::toolbar::adjust_width(if up { 1.0 } else { -1.0 });
+            }
+        }
+        _ => {}
+    }
+}
+
 // 鼠标按下常量自己定义，避免依赖未开启的 windows crate feature。
 // （用 match 分支引用未定义常量会被编译器当成变量绑定，曾导致启动崩溃）
 const WM_LBUTTONDOWN_C: u32 = 0x0201;
@@ -193,7 +239,6 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
         let kb = &*(lparam.0 as *const KBDLLHOOKSTRUCT);
         let state_ptr = G_STATE_PTR as *const RefCell<AppState>;
         let canvas_hwnd = HWND(G_CANVAS_PTR as *mut _);
-        let toolbar_hwnd = HWND(G_TOOLBAR_PTR as *mut _);
 
         // 只响应「按下」。按住不放时系统会连发 WM_KEYDOWN，
         // 用一个闩锁保证长按只触发一次（否则空格会来回抖动）。
@@ -229,8 +274,7 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
                 SPACE_LAST = kb.time;
                 if fresh {
                     SPACE_LATCH = true;
-                    let _ = (canvas_hwnd, toolbar_hwnd);
-                    crate::toolbar::toggle_collapse();
+                    post_action(canvas_hwnd, HOOK_TOGGLE, 0);
                 }
             } else {
                 // 组合键中的右侧 Ctrl 不属于我们：不碰工具条，也不更新闩锁。
@@ -244,12 +288,9 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
             ESC_LAST = kb.time;
             if fresh {
                 ESC_LATCH = true;
-                if !keyboard_owned_by_edit() && !canvas_hwnd.is_invalid() {
-                    // Esc = 整体退出标注（画布收起、工具条收回主图标），
-                    // 图形留着，下次选工具还在
-                    crate::canvas::exit_markup();
-                    let _ = toolbar_hwnd;
-                }
+                // Esc = 整体退出标注（画布收起、工具条收回主图标），图形留着。
+                // 是否让给输入框在窗口过程里判断（要跨进程查询，不能放进钩子）。
+                post_action(canvas_hwnd, HOOK_ESC, 0);
             }
         }
 
@@ -270,18 +311,11 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
             if fresh {
                 DEL_LATCH = true;
                 let ours = DEL_OWNED_BY_US && !crate::textedit::is_typing();
-                if crate::dbg::enabled() {
-                    crate::dbg::logf!(
-                        "删除键 vk={:#x} ours={} lastClickOurs={} typing={}",
-                        kb.vkCode,
-                        ours,
-                        DEL_OWNED_BY_US,
-                        crate::textedit::is_typing()
-                    );
-                }
-                // 只有真的删掉了图元才吞掉按键：否则在 PPT / Word 里选中对象时
-                // 按 Del 会连别人的内容一起删掉。没删成则原样放行。
-                if ours && crate::canvas::delete_selected() {
+                // 吞键必须在钩子回调里同步决定，所以只做「本地轻量判定」：
+                // 最近一次点击属于我们 + 没在打字 + 确实有选中图元。
+                // 真正的删除（会整屏重绘）投给窗口过程异步执行。
+                if ours && crate::canvas::has_selection() {
+                    post_action(canvas_hwnd, HOOK_DELETE, kb.vkCode as isize);
                     return LRESULT(1);
                 }
             }
@@ -318,30 +352,27 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
                 // mouseData 的高 16 位是有符号滚轮增量
                 let delta = ((ms.mouseData >> 16) & 0xFFFF) as u16 as i16;
                 let canvas_hwnd = HWND(G_CANVAS_PTR as *mut _);
-                let tool = (*state_ptr).borrow().tool;
+                let tool = (*state_ptr)
+                    .try_borrow()
+                    .map(|st| st.tool)
+                    .unwrap_or(crate::shape::Tool::None);
                 let active = tool != crate::shape::Tool::None;
                 let expanded = crate::toolbar::is_expanded();
                 let through = crate::canvas::is_click_through();
                 let visible = !canvas_hwnd.is_invalid()
                     && IsWindowVisible(canvas_hwnd).as_bool();
                 let handle = expanded && !through && active && visible;
-                if crate::dbg::enabled() {
-                    crate::dbg::logf!(
-                        "滚轮 delta={} tool={:?} 展开={} 穿透={} 可见={} 处理={}",
-                        delta, tool, expanded, through, visible, handle
-                    );
-                }
                 if handle {
-                    // 滚轮分工：
+                    // 滚轮分工（在 dispatch 里执行）：
                     //   放大镜/聚光灯  → 调取景范围（半径）
                     //   放大镜 + Ctrl  → 调放大倍率
                     //   马赛克         → 调区域大小（重新抓屏打码）
                     //   选择态         → 看选中的是什么，套用上面同一套
                     //   其它工具       → 调线宽/字号（序号的大小也由线宽派生）
                     let ctrl = (GetKeyState(VK_CONTROL.0 as i32) as u16 & 0x8000) != 0;
-                    if !canvas::handle_wheel(delta > 0, ctrl) {
-                        crate::toolbar::adjust_width(if delta > 0 { 1.0 } else { -1.0 });
-                    }
+                    let up = delta > 0;
+                    let param = (up as isize) | ((ctrl as isize) << 1);
+                    post_action(canvas_hwnd, HOOK_WHEEL, param);
                 }
             }
         }
@@ -362,7 +393,15 @@ pub fn install(
         G_TOOLBAR_PTR = toolbar_hwnd.0 as usize;
 
         KEYBOARD_HOOK = SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_proc), hinstance, 0)?;
-        MOUSE_HOOK = SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_proc), hinstance, 0)?;
+        // 第二个钩子安装失败时要把第一个卸掉，否则启动失败也会留下一个全局钩子。
+        MOUSE_HOOK = match SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_proc), hinstance, 0) {
+            Ok(h) => h,
+            Err(e) => {
+                let _ = UnhookWindowsHookEx(KEYBOARD_HOOK);
+                KEYBOARD_HOOK = HHOOK(ptr::null_mut());
+                return Err(e);
+            }
+        };
         Ok(())
     }
 }

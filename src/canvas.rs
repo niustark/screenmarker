@@ -17,6 +17,7 @@ use crate::textedit;
 use std::cell::RefCell;
 use std::ptr;
 use std::rc::Rc;
+use std::time::Instant;
 
 use windows::core::*;
 use windows::Win32::Foundation::*;
@@ -157,6 +158,17 @@ fn hwnd_of() -> HWND {
 unsafe extern "system" fn canvas_wndproc(
     hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM,
 ) -> LRESULT {
+    // 全局低级钩子只负责判定 + 投递，实际动作（重绘 / 窗口重排 / 跨进程查询）
+    // 一律在窗口过程里执行，避免钩子回调超时被系统摘掉。
+    if msg == crate::hooks::WM_APP_HOOK_ACTION {
+        crate::hooks::dispatch(wparam.0, lparam.0);
+        return LRESULT(0);
+    }
+    // 节流合并后的补帧
+    if msg == WM_TIMER && wparam.0 == REPAINT_TIMER_ID {
+        repaint_timer_tick(hwnd);
+        return LRESULT(0);
+    }
     let state_ptr = st_ptr();
     match msg {
         WM_PAINT => {
@@ -450,7 +462,7 @@ unsafe extern "system" fn canvas_wndproc(
                 };
                 if moved {
                     POLY_RUBBER = Some(p);
-                    repaint(hwnd);
+                    request_repaint(hwnd);
                 }
                 return LRESULT(0);
             }
@@ -463,7 +475,7 @@ unsafe extern "system" fn canvas_wndproc(
                     let mut st = (*state_ptr).borrow_mut();
                     erase_at(&mut st, p);
                     drop(st);
-                    repaint(hwnd);
+                    request_repaint(hwnd);
                 }
                 Tool::None | Tool::Select => {
                     let changed = {
@@ -471,7 +483,7 @@ unsafe extern "system" fn canvas_wndproc(
                         edit_drag(&mut st, p)
                     };
                     if changed {
-                        repaint(hwnd);
+                        request_repaint(hwnd);
                     }
                 }
                 Tool::Magnifier => {
@@ -498,7 +510,7 @@ unsafe extern "system" fn canvas_wndproc(
                             }
                         }
                         if changed {
-                            repaint(hwnd);
+                            request_repaint(hwnd);
                         }
                     }
                 }
@@ -526,7 +538,7 @@ unsafe extern "system" fn canvas_wndproc(
                             }
                         }
                         if changed {
-                            repaint(hwnd);
+                            request_repaint(hwnd);
                         }
                     }
                 }
@@ -537,7 +549,7 @@ unsafe extern "system" fn canvas_wndproc(
                         edit_drag(&mut st, p)
                     };
                     if changed {
-                        repaint(hwnd);
+                        request_repaint(hwnd);
                     }
                 }
                 Tool::Mosaic => {
@@ -573,7 +585,7 @@ unsafe extern "system" fn canvas_wndproc(
                                     *rect = r;
                                 }
                             }
-                            repaint(hwnd);
+                            request_repaint(hwnd);
                         }
                     }
                 }
@@ -582,12 +594,15 @@ unsafe extern "system" fn canvas_wndproc(
                     let mut st = (*state_ptr).borrow_mut();
                     update_draw(&mut st, p);
                     drop(st);
-                    repaint(hwnd);
+                    request_repaint(hwnd);
                 }
             }
             LRESULT(0)
         }
         WM_LBUTTONUP => {
+            // 拖动期间被合并掉的重绘由下面这次同步 repaint 补上，
+            // 先把定时器撤掉，免得紧接着又多提交一帧整屏。
+            cancel_pending_repaint(hwnd);
             // 注意：必须先释放捕获，否则后续所有鼠标消息都会被画布截走，
             // 工具条按钮就永远点不动了
             ReleaseCapture();
@@ -882,8 +897,76 @@ fn render_one(f: &Frame, sh: &Shape) {
     }
 }
 
+// ---------- 重绘节流 ----------
+/// 1080p 一帧约 8MB、4K 约 33MB，WM_MOUSEMOVE 每条都整屏提交太贵。
+/// 高频路径走 request_repaint()：最多每 16ms 一帧，期间的请求合并成一次
+/// 定时器补帧；松手 / 按下 / 滚轮等低频路径仍走同步 repaint()，立刻见效。
+const FRAME_MS: u32 = 16;
+const REPAINT_TIMER_ID: usize = 0x534D_5250; // "SMRP"
+static mut LAST_REPAINT: Option<Instant> = None;
+static mut REPAINT_TIMER_ON: bool = false;
+
+pub fn request_repaint(hwnd: HWND) {
+    unsafe {
+        let now = Instant::now();
+        let due = LAST_REPAINT
+            .map(|t| now.duration_since(t).as_millis() >= FRAME_MS as u128)
+            .unwrap_or(true);
+        if due {
+            LAST_REPAINT = Some(now);
+            repaint(hwnd);
+        } else if !REPAINT_TIMER_ON {
+            REPAINT_TIMER_ON = SetTimer(hwnd, REPAINT_TIMER_ID, FRAME_MS, None) != 0;
+        }
+    }
+}
+
+pub fn request_repaint_global() {
+    let h = hwnd_of();
+    if !h.is_invalid() && unsafe { IsWindowVisible(h).as_bool() } {
+        request_repaint(h);
+    }
+}
+
+/// 定时器到点：把合并掉的请求补成最后一帧。
+fn repaint_timer_tick(hwnd: HWND) {
+    unsafe {
+        let _ = KillTimer(hwnd, REPAINT_TIMER_ID);
+        REPAINT_TIMER_ON = false;
+    }
+    repaint(hwnd);
+}
+
+/// 松手这类「马上要同步重绘」的时刻：取消待补帧，避免重复提交整屏。
+pub fn cancel_pending_repaint(hwnd: HWND) {
+    unsafe {
+        if REPAINT_TIMER_ON {
+            let _ = KillTimer(hwnd, REPAINT_TIMER_ID);
+            REPAINT_TIMER_ON = false;
+        }
+    }
+}
+
+/// 是否真的有选中的图元。给全局键盘钩子在回调里做轻量判定：
+/// 只查本地状态，绝不在这里重绘；try_borrow 避免与窗口过程的借用撞车后 panic
+/// （release 是 panic=abort，一崩就是整个进程）。
+pub fn has_selection() -> bool {
+    let sp = st_ptr();
+    if sp.is_null() {
+        return false;
+    }
+    unsafe {
+        let n = match (*sp).try_borrow() {
+            Ok(st) => st.shapes.len(),
+            Err(_) => 0,
+        };
+        matches!(SELECTED, Some(i) if i < n)
+    }
+}
+
 pub fn repaint(hwnd: HWND) {
     unsafe {
+        LAST_REPAINT = Some(Instant::now());
         if FRAME_PTR == 0 || hwnd.is_invalid() {
             crate::dbg::log("repaint 跳过：FRAME_PTR=0 或窗口无效");
             return;
