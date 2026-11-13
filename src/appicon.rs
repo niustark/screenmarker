@@ -4,6 +4,8 @@
 // 编译链上多一个外部依赖就多一个出错点。include_bytes! + 运行时解析更稳，
 // 且 exe 仍然是单文件。
 
+use std::sync::OnceLock;
+
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 const ICO: &[u8] = include_bytes!("../app.ico");
@@ -11,6 +13,18 @@ const ICO: &[u8] = include_bytes!("../app.ico");
 /// 从内嵌的 ICO 里挑一个最合适的尺寸，返回 HICON（失败返回 null，调用方可用默认图标）
 pub fn load() -> HICON {
     load_sized(0, 0)
+}
+
+/// 供 WNDCLASSW.hIcon 使用的进程级共享图标。
+///
+/// 窗口类只注册一次：之后每次 RegisterClassW 都返回「已存在」，新造的 HICON
+/// 不会被任何人持有，也没人去 DestroyIcon —— 每打开一次文字框 / 关于窗口就
+/// 泄漏一个图标句柄。这里只创建一次，之后所有窗口类共用它，随进程退出回收。
+/// （托盘图标尺寸不同，仍走 load_sized 单独创建。）
+pub fn shared() -> HICON {
+    static SHARED: OnceLock<usize> = OnceLock::new();
+    let p = *SHARED.get_or_init(|| load().0 as usize);
+    HICON(p as *mut core::ffi::c_void)
 }
 
 /// 指定期望尺寸（0,0 = 系统默认）。托盘图标要用 SM_CXSMICON 取，否则会被拉伸糊掉

@@ -68,9 +68,28 @@ impl Frame {
                 bmiColors: [RGBQUAD::default(); 1],
             };
             let mut bits: *mut core::ffi::c_void = ptr::null_mut();
-            let dib = CreateDIBSection(hdc_screen, &bi, DIB_RGB_COLORS, &mut bits, None, 0).ok()?;
+            // 早退路径也必须把已经拿到的 HDC / HBITMAP 还回去，
+            // 否则「创建帧缓冲失败」会一次漏掉两个 GDI 句柄。
+            let dib = match CreateDIBSection(hdc_screen, &bi, DIB_RGB_COLORS, &mut bits, None, 0) {
+                Ok(d) => d,
+                Err(_) => {
+                    ReleaseDC(None, hdc_screen);
+                    return None;
+                }
+            };
             let mem_dc = CreateCompatibleDC(hdc_screen);
+            if mem_dc.is_invalid() {
+                DeleteObject(HGDIOBJ(dib.0));
+                ReleaseDC(None, hdc_screen);
+                return None;
+            }
             let old_bmp = SelectObject(mem_dc, HGDIOBJ(dib.0));
+            if old_bmp.is_invalid() {
+                DeleteDC(mem_dc);
+                DeleteObject(HGDIOBJ(dib.0));
+                ReleaseDC(None, hdc_screen);
+                return None;
+            }
             Some(Frame {
                 w,
                 h,
@@ -235,6 +254,10 @@ impl Frame {
                     n += 1;
                 }
                 if n == 0 {
+                    // 绘制色与背景色太接近（例如近黑色），三个通道都没有分辨力，
+                    // 解不出覆盖率。留着不动会被 fix_alpha 提成不透明、留下一圈
+                    // 发黑的毛边，所以按「覆盖度为零」还原成透明背景。
+                    *p = if (*p >> 24) == 0 { BG_RGB } else { BG_PIXEL };
                     continue;
                 }
                 // 三通道解出的 t 不一致 → 这个像素不是我们画的（比如底下原有的图形）
@@ -297,7 +320,7 @@ impl Frame {
                 ULW_ALPHA,
             )
             .map_err(|e| {
-                crate::dbg::log(&format!("UpdateLayeredWindow 失败: {e:?}"));
+                crate::dbg::logf!("UpdateLayeredWindow 失败: {e:?}");
             });
         }
     }
@@ -339,5 +362,20 @@ mod tests {
         f.clear();
         f.convert_magic((0.0, 0.0, 64.0, 64.0), (255, 0, 0), 128);
         assert_eq!(f.alpha_at(10, 10), 1, "绘图态空白保持 alpha=1");
+    }
+
+    /// 回归：绘制色与背景色几乎一样时（各通道差值 < 4），resolve() 解不出
+    /// 覆盖率。旧代码直接 continue，留下一个「非背景 RGB、alpha=0」的像素，
+    /// 随后 fix_alpha 会把它提成不透明，表现就是一圈发黑的毛边。
+    #[test]
+    fn indistinguishable_color_has_no_dark_fringe() {
+        let f = Frame::new(64, 64).expect("Frame::new 失败");
+        f.clear_transparent();
+        // 介于 BG_RGB(3,2,1) 与绘制色(5,4,3) 之间的 AA 边缘像素
+        f.pixels()[20 * 64 + 20] = px_of((4, 3, 2));
+        f.unmix((0.0, 0.0, 64.0, 64.0), (5, 4, 3));
+        assert_eq!(f.alpha_at(30, 30), 0, "穿透态空白保持 alpha=0");
+        f.fix_alpha();
+        assert_eq!(f.alpha_at(20, 20), 0, "解不出覆盖率的像素不应被提成不透明");
     }
 }

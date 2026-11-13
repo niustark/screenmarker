@@ -212,12 +212,12 @@ unsafe extern "system" fn canvas_wndproc(
                 return LRESULT(0);
             }
             let p = point_of(lparam);
-            crate::dbg::log(&format!(
+            crate::dbg::logf!(
                 "canvas 收到按下 p=({:.0},{:.0}) tool={:?}",
                 p.x,
                 p.y,
                 (*state_ptr).borrow().tool
-            ));
+            );
             SetCapture(hwnd);
             let tool = (*state_ptr).borrow().tool;
             match tool {
@@ -409,7 +409,7 @@ unsafe extern "system" fn canvas_wndproc(
             }
             raise_toolbar();
             // 自动化验证用：只在 SM_LOG 打开时写，平时不产生任何文件
-            if std::env::var_os("SM_LOG").is_some() {
+            if crate::dbg::enabled() {
                 let st = (*state_ptr).borrow();
                 let mag = st
                     .shapes
@@ -421,10 +421,10 @@ unsafe extern "system" fn canvas_wndproc(
                     .iter()
                     .filter(|s| matches!(s, Shape::Spotlight { .. }))
                     .count();
-                crate::dbg::log(&format!(
+                crate::dbg::logf!(
                     "按下后 放大镜={mag} 聚光灯={spot} 图元总数={}",
                     st.shapes.len()
-                ));
+                );
             }
             repaint(hwnd);
             LRESULT(0)
@@ -643,22 +643,22 @@ unsafe extern "system" fn canvas_wndproc(
             }
             DRAG_LAST = None;
             // 自动化验证用：松手时把圆形图元的几何打出来
-            if std::env::var_os("SM_LOG").is_some() {
+            if crate::dbg::enabled() {
                 let st = (*state_ptr).borrow();
                 for s in st.shapes.iter() {
                     match s {
-                        Shape::Spotlight { center, radius } => crate::dbg::log(&format!(
+                        Shape::Spotlight { center, radius } => crate::dbg::logf!(
                             "几何 聚光 center=({:.0},{:.0}) r={:.0}",
                             center.x, center.y, radius
-                        )),
+                        ),
                         Shape::Magnifier {
                             center,
                             radius,
                             zoom,
-                        } => crate::dbg::log(&format!(
+                        } => crate::dbg::logf!(
                             "几何 放大 center=({:.0},{:.0}) r={:.0} zoom={:.2}",
                             center.x, center.y, radius, zoom
-                        )),
+                        ),
                         _ => {}
                     }
                 }
@@ -763,8 +763,13 @@ unsafe extern "system" fn canvas_wndproc(
                     CURRENT_DRAWING = None;
                     DRAW_START = None;
                     if tool == Tool::Watermark {
-                        st.shapes
-                            .retain(|s| !matches!(s, Shape::Watermark { .. }));
+                        while let Some(i) = st
+                            .shapes
+                            .iter()
+                            .rposition(|s| matches!(s, Shape::Watermark { .. }))
+                        {
+                            remove_shape(&mut *st, i);
+                        }
                         crate::dbg::log("右键退出水印 已删除水印");
                     }
                 }
@@ -789,19 +794,12 @@ unsafe extern "system" fn canvas_wndproc(
                         st.tool = Tool::Select;
                         CURRENT_DRAWING = None;
                         DRAW_START = None;
-                        let removed = st
-                            .shapes
-                            .iter()
-                            .rposition(|s| match tool {
-                                Tool::Spotlight => matches!(s, Shape::Spotlight { .. }),
-                                _ => matches!(s, Shape::Magnifier { .. }),
-                            })
-                            .map(|i| {
-                                st.shapes.remove(i);
-                                true
-                            })
-                            .unwrap_or(false);
-                        crate::dbg::log(&format!("右键退出{:?} 删除圆={removed}", tool));
+                        let idx = st.shapes.iter().rposition(|s| match tool {
+                            Tool::Spotlight => matches!(s, Shape::Spotlight { .. }),
+                            _ => matches!(s, Shape::Magnifier { .. }),
+                        });
+                        let removed = idx.map(|i| remove_shape(&mut *st, i)).unwrap_or(false);
+                        crate::dbg::logf!("右键退出{:?} 删除圆={removed}", tool);
                     }
                     select_none();
                     crate::cursor::apply(Tool::Select);
@@ -1009,7 +1007,7 @@ pub fn zoom_spotlight(up: bool) {
             if let Some(Shape::Spotlight { radius, .. }) = st.shapes.get_mut(i) {
                 let k = if up { SPOT_ZOOM } else { 1.0 / SPOT_ZOOM };
                 *radius = (*radius * k).clamp(SPOT_MIN, SPOT_MAX);
-                crate::dbg::log(&format!("滚轮 聚光半径 r={:.0}", radius));
+                crate::dbg::logf!("滚轮 聚光半径 r={:.0}", radius);
                 changed = true;
             }
         }
@@ -1046,12 +1044,12 @@ pub fn sync_watermark() {
         }
     }
     // 只在开了 SM_LOG 时写文件，方便自动化验证「颜色/字号确实传到了水印上」
-    crate::dbg::log(&format!(
+    crate::dbg::logf!(
         "水印同步 个数={n} color=({},{},{}) size={size:.1}",
         color.red(),
         color.green(),
         color.blue()
-    ));
+    );
 }
 
 /// 供其它模块调用：重新把工具条提回画布之上。
@@ -1345,14 +1343,14 @@ fn end_draw(st: &mut AppState, p: Point) {
         }
         let _ = p;
         // 自动化验证用：把刚落定图形的几何写进日志（只在 SM_LOG 打开时）
-        if std::env::var_os("SM_LOG").is_some() {
+        if crate::dbg::enabled() {
             match &sh {
-                Shape::Rect { rect, .. } | Shape::Ellipse { rect, .. } => crate::dbg::log(&format!(
+                Shape::Rect { rect, .. } | Shape::Ellipse { rect, .. } => crate::dbg::logf!(
                     "几何 方框 {:.0}x{:.0} at ({:.0},{:.0})",
                     rect.w, rect.h, rect.x, rect.y
-                )),
+                ),
                 Shape::Number { radius, .. } => {
-                    crate::dbg::log(&format!("几何 序号 r={:.0}", radius))
+                    crate::dbg::logf!("几何 序号 r={:.0}", radius)
                 }
                 _ => {}
             }
@@ -1531,10 +1529,70 @@ fn capture_snapshot() {
     let cap = capture_screen(0, 0, sw, sh);
     if let Some((data, w, hh)) = cap {
         set_snapshot((data, w, hh));
-        crate::dbg::log(&format!("放大镜快照 {w}x{hh}"));
+        crate::dbg::logf!("放大镜快照 {w}x{hh}");
     }
     // 快照先存好再显示画布，否则 show_canvas 里的重绘取不到样
     show_canvas(h);
+}
+
+/// 删除第 i 个图元，并同步修正所有指向 `shapes` 的下标。
+///
+/// Vec::remove 会让后面的元素整体前移；旧代码只调 select_none() 清 SELECTED，
+/// ACTIVE_MOSAIC / MZ_IDX / EDIT_IDX 和输入框的 TE_SHAPE_IDX 都没改，
+/// 于是选中框、马赛克抓手、滚轮缩放、文字提交可能串到别的图元上。
+pub fn remove_shape(st: &mut AppState, i: usize) -> bool {
+    if i >= st.shapes.len() {
+        return false;
+    }
+    st.shapes.remove(i);
+    unsafe {
+        SELECTED = match SELECTED {
+            Some(s) if s == i => None,
+            Some(s) if s > i => Some(s - 1),
+            other => other,
+        };
+        fn shift(v: usize, i: usize) -> usize {
+            if v == usize::MAX || v < i {
+                v
+            } else if v == i {
+                usize::MAX
+            } else {
+                v - 1
+            }
+        }
+        ACTIVE_MOSAIC = shift(ACTIVE_MOSAIC, i);
+        MZ_IDX = shift(MZ_IDX, i);
+        EDIT_IDX = shift(EDIT_IDX, i);
+        if MZ_IDX == usize::MAX {
+            MZ_MASK = 0;
+            MZ_P0 = None;
+            MZ_RECT0 = None;
+        }
+        if EDIT_IDX == usize::MAX {
+            EDIT_MASK = 0;
+            EDIT_BASE = None;
+            DRAG_LAST = None;
+        }
+    }
+    textedit::shift_shape_index(i);
+    true
+}
+
+/// 画布被整体清空 / 撤销时，所有指向 shapes 的下标一次性归零。
+pub fn reset_shape_indices() {
+    unsafe {
+        SELECTED = None;
+        ACTIVE_MOSAIC = usize::MAX;
+        MZ_IDX = usize::MAX;
+        MZ_MASK = 0;
+        MZ_P0 = None;
+        MZ_RECT0 = None;
+        EDIT_IDX = usize::MAX;
+        EDIT_MASK = 0;
+        EDIT_BASE = None;
+        DRAG_LAST = None;
+    }
+    textedit::reset_shape_index();
 }
 
 /// 取消选中（清空/撤销后调用）
@@ -1556,10 +1614,7 @@ pub fn delete_selected() -> bool {
     let removed = {
         let mut st = unsafe { (*sp).borrow_mut() };
         match unsafe { SELECTED } {
-            Some(i) if i < st.shapes.len() => {
-                st.shapes.remove(i);
-                true
-            }
+            Some(i) => remove_shape(&mut *st, i),
             _ => false,
         }
     };
@@ -1774,7 +1829,7 @@ pub fn resize_magnifier(up: bool) {
             if let Some(Shape::Magnifier { radius, .. }) = st.shapes.get_mut(i) {
                 let k = if up { 1.10 } else { 1.0 / 1.10 };
                 *radius = (*radius * k).clamp(MAG_MIN_R, MAG_MAX_R);
-                crate::dbg::log(&format!("滚轮 放大半径 r={:.0}", radius));
+                crate::dbg::logf!("滚轮 放大半径 r={:.0}", radius);
                 changed = true;
             }
         }
@@ -1823,7 +1878,7 @@ pub fn zoom_magnifier(up: bool) {
             if let Some(Shape::Magnifier { zoom, .. }) = st.shapes.get_mut(i) {
                 let k = if up { MAG_ZOOM_STEP } else { 1.0 / MAG_ZOOM_STEP };
                 *zoom = (*zoom * k).clamp(MAG_ZOOM_MIN, MAG_ZOOM_MAX);
-                crate::dbg::log(&format!("滚轮 放大倍率 z={:.2}", zoom));
+                crate::dbg::logf!("滚轮 放大倍率 z={:.2}", zoom);
                 changed = true;
             }
         }
@@ -1880,10 +1935,10 @@ pub fn resize_mosaic(up: bool) -> bool {
             rect.h = h;
             rect.x = (cx - w / 2.0).clamp(0.0, (sw - w).max(0.0));
             rect.y = (cy - h / 2.0).clamp(0.0, (sh - h).max(0.0));
-            crate::dbg::log(&format!(
+            crate::dbg::logf!(
                 "滚轮 马赛克尺寸 {:.0}x{:.0}",
                 rect.w, rect.h
-            ));
+            );
         }
     }
     // 重新抓屏打码（内部会 hide/show 画布并重绘）
@@ -1940,7 +1995,7 @@ pub fn zoom_selected(up: bool) -> bool {
                 let c = bb.center();
                 let k = if up { 1.10 } else { 1.0 / 1.10 };
                 st.shapes[i].scale_about(c, k, k);
-                crate::dbg::log(&format!("滚轮 选中图元缩放 k={k:.3}"));
+                crate::dbg::logf!("滚轮 选中图元缩放 k={k:.3}");
                 done = true;
             }
         }
@@ -2033,7 +2088,7 @@ pub fn sync_text() {    let sp = st_ptr();
         }
         (fs, n)
     };
-    crate::dbg::log(&format!("文字同步 个数={n} size={fs:.1}"));
+    crate::dbg::logf!("文字同步 个数={n} size={fs:.1}");
     crate::textedit::retune();
 }
 
@@ -2077,12 +2132,12 @@ pub fn sync_number() {
             *c = color;
         }
     }
-    crate::dbg::log(&format!(
+    crate::dbg::logf!(
         "序号同步 color=({},{},{}) r={radius:.0}",
         color.red(),
         color.green(),
         color.blue()
-    ));
+    );
 }
 
 /// 选中的序号用滚轮调大小（选择态下生效）
@@ -2099,7 +2154,7 @@ pub fn resize_number(up: bool) -> bool {
     if let Some(Shape::Number { radius, .. }) = st.shapes.get_mut(i) {
         let k = if up { 1.12 } else { 1.0 / 1.12 };
         *radius = (*radius * k).clamp(10.0, 400.0);
-        crate::dbg::log(&format!("滚轮 序号半径 r={:.0}", radius));
+        crate::dbg::logf!("滚轮 序号半径 r={:.0}", radius);
         done = true;
     }
     drop(st);
@@ -2127,7 +2182,7 @@ fn erase_at(st: &mut AppState, p: Point) {
     let mut i = 0;
     while i < st.shapes.len() {
         if st.shapes[i].erasable() && st.shapes[i].hit(p, r) {
-            st.shapes.remove(i);
+            remove_shape(st, i);
         } else {
             i += 1;
         }
@@ -2310,7 +2365,7 @@ pub fn apply_watermark() {
             }
             None => st.shapes.push(Shape::Watermark { text, color, size }),
         }
-        crate::dbg::log(&format!("水印应用 text={:?}", st.watermark_text));
+        crate::dbg::logf!("水印应用 text={:?}", st.watermark_text);
     }
     repaint_global();
 }
@@ -2373,7 +2428,7 @@ impl Canvas {
                 lpfnWndProc: Some(canvas_wndproc),
                 hInstance: hinstance,
                 hbrBackground: HBRUSH(ptr::null_mut()),
-                hIcon: crate::appicon::load(),
+                hIcon: crate::appicon::shared(),
 
                 lpszClassName: class_name,
                 ..Default::default()

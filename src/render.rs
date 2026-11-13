@@ -211,14 +211,15 @@ impl Renderer {
     /// 踩过的坑：DrawTextW **不认世界变换**（SetWorldTransform），把 DC 转了也还是横的。
     /// GDI 里真正能给文字上角度的办法是字体本身的 escapement/orientation
     /// （单位 1/10 度，逆时针为正），配合 ExtTextOutW 直接按点输出。
-    fn text_angled(&self, s: &str, color: Color, font_size: i32, at: Point, deg: f32) {
+    /// 倾斜字体单独建一次即可（水印一帧要铺十几个锚点）。
+    fn angled_font(font_size: i32, deg: f32) -> HFONT {
         unsafe {
             let esc = (deg * 10.0) as i32; // 450 = 逆时针 45°
-            let font = CreateFontW(
+            CreateFontW(
                 -font_size.max(6),
                 0,
-                esc,  // lfEscapement：整行走向
-                esc,  // lfOrientation：字形自身也转
+                esc, // lfEscapement：整行走向
+                esc, // lfOrientation：字形自身也转
                 400,
                 0,
                 0,
@@ -229,11 +230,13 @@ impl Renderer {
                 0,
                 0,
                 w!("Microsoft YaHei"),
-            );
-            let old_font = SelectObject(self.hdc, HGDIOBJ(font.0));
-            SetBkMode(self.hdc, TRANSPARENT);
-            SetTextColor(self.hdc, Self::gdi_color(color));
-            let wide: Vec<u16> = s.encode_utf16().collect();
+            )
+        }
+    }
+
+    /// 只负责把已转好的宽字符串按点输出；字体/DC 状态由调用方设置一次。
+    fn draw_angled_wide(&self, wide: &[u16], at: Point) {
+        unsafe {
             if !wide.is_empty() {
                 ExtTextOutW(
                     self.hdc,
@@ -246,8 +249,6 @@ impl Renderer {
                     None,
                 );
             }
-            SelectObject(self.hdc, old_font);
-            DeleteObject(HGDIOBJ(font.0));
         }
     }
 
@@ -672,6 +673,13 @@ impl Renderer {
                 (center.y + radius) as i32,
             );
             if full.is_invalid() || hole.is_invalid() {
+                // 只成功创建了其中一个时也要还回去
+                if !full.is_invalid() {
+                    DeleteObject(HGDIOBJ(full.0));
+                }
+                if !hole.is_invalid() {
+                    DeleteObject(HGDIOBJ(hole.0));
+                }
                 return;
             }
             // RGN_DIFF：full 减去 hole，剩下的就是圆外面那圈
@@ -754,14 +762,25 @@ impl Renderer {
         let fs = size.max(8.0);
         let step_x = (fs * 12.3).min(sw as f32 / 3.0).max(fs);
         let step_y = (fs * 9.2).min(sh as f32 / 3.0).max(fs);
-        let mut y = -step_y;
-        while y < sh as f32 + step_y {
-            let mut x = -step_x;
-            while x < sw as f32 + step_x {
-                self.text_angled(text, c, fs as i32, Point::new(x, y), 45.0);
-                x += step_x;
+        // 字体、宽字符串、DC 状态只准备一次；原来每个锚点都调 text_angled()，
+        // 一帧要 CreateFontW + encode_utf16 十几次。
+        unsafe {
+            let font = Self::angled_font(fs as i32, 45.0);
+            let old_font = SelectObject(self.hdc, HGDIOBJ(font.0));
+            SetBkMode(self.hdc, TRANSPARENT);
+            SetTextColor(self.hdc, Self::gdi_color(c));
+            let wide: Vec<u16> = text.encode_utf16().collect();
+            let mut y = -step_y;
+            while y < sh as f32 + step_y {
+                let mut x = -step_x;
+                while x < sw as f32 + step_x {
+                    self.draw_angled_wide(&wide, Point::new(x, y));
+                    x += step_x;
+                }
+                y += step_y;
             }
-            y += step_y;
+            SelectObject(self.hdc, old_font);
+            DeleteObject(HGDIOBJ(font.0));
         }
     }
 
@@ -1365,6 +1384,10 @@ fn measure_ink(s: &str, font_size: i32) -> Option<(i32, i32, i32, i32)> {
             return None;
         }
         let mem = CreateCompatibleDC(screen);
+        if mem.is_invalid() {
+            ReleaseDC(None, screen);
+            return None;
+        }
         // 留够余量：字号两倍边距，字符数 + 2 的横向预算，斜体/连笔也不会被切
         let pad = fs + 6;
         let bw = ((s.chars().count().max(1) as i32 + 2) * fs).max(32) + pad * 2;
@@ -1382,7 +1405,15 @@ fn measure_ink(s: &str, font_size: i32) -> Option<(i32, i32, i32, i32)> {
             bmiColors: [RGBQUAD::default(); 1],
         };
         let mut bits: *mut core::ffi::c_void = std::ptr::null_mut();
-        let dib = CreateDIBSection(screen, &bi, DIB_RGB_COLORS, &mut bits, None, 0).ok()?;
+        // 原来的 `.ok()?` 会把 screen/mem 两个 DC 一起漏掉。
+        let dib = match CreateDIBSection(screen, &bi, DIB_RGB_COLORS, &mut bits, None, 0) {
+            Ok(d) => d,
+            Err(_) => {
+                DeleteDC(mem);
+                ReleaseDC(None, screen);
+                return None;
+            }
+        };
         let old = SelectObject(mem, HGDIOBJ(dib.0));
 
         // 黑底

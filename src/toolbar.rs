@@ -21,6 +21,7 @@ use crate::shape::*;
 use std::cell::RefCell;
 use std::ptr;
 use std::rc::Rc;
+use std::sync::{Mutex, OnceLock};
 
 use windows::core::*;
 use windows::Win32::Foundation::*;
@@ -263,9 +264,38 @@ fn layout(s: f32) -> (i32, i32, Vec<(RECT, Action)>) {
     (w, h, items)
 }
 
+/// layout() 的按缩放比缓存。
+///
+/// s 实际只有两个值：命中测试/尺寸用 SCALE，绘制用 SCALE*4（超采样）。
+/// 但 WM_NCHITTEST、MOUSEMOVE、PAINT 等 7 处都会调 layout()，每次重建
+/// 一份约 27 个矩形的 Vec。这里按 s 缓存进程级条目，命中与绘制共用。
+/// 条目用 Box::leak 常驻（最多几个槽，随进程退出回收）。
+struct LayoutEntry {
+    key: u32,
+    w: i32,
+    h: i32,
+    items: Vec<(RECT, Action)>,
+}
+static LAYOUT_CACHE: OnceLock<Mutex<Vec<&'static LayoutEntry>>> = OnceLock::new();
+
+fn layout_cached(s: f32) -> &'static LayoutEntry {
+    let key = s.to_bits();
+    let mut slots = LAYOUT_CACHE
+        .get_or_init(|| Mutex::new(Vec::new()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if let Some(e) = slots.iter().find(|e| e.key == key) {
+        return *e;
+    }
+    let (w, h, items) = layout(s);
+    let e: &'static LayoutEntry = Box::leak(Box::new(LayoutEntry { key, w, h, items }));
+    slots.push(e);
+    e
+}
+
 unsafe fn expanded_size() -> (i32, i32) {
-    let (w, h, _) = layout(SCALE);
-    (w, h)
+    let e = layout_cached(SCALE);
+    (e.w, e.h)
 }
 
 unsafe fn collapsed_size() -> i32 {
@@ -589,7 +619,7 @@ unsafe fn paint_content(
         return;
     }
 
-    let (_, _, items) = layout(s);
+    let items = &layout_cached(s).items;
     let st = if state_ptr.is_null() {
         None
     } else {
@@ -600,7 +630,7 @@ unsafe fn paint_content(
     let width = st.as_ref().map(|x| x.width).unwrap_or(4.0);
     drop(st);
 
-    for (r, act) in items {
+    for &(r, act) in items.iter() {
         match act {
             Action::Tool(t) => {
                 let on = t == tool;
@@ -815,8 +845,8 @@ unsafe extern "system" fn toolbar_wndproc(
             let mut pt = POINT { x: sx, y: sy };
             ScreenToClient(hwnd, &mut pt);
             if EXPANDED {
-                let (_, _, items) = layout(SCALE);
-                for (r, act) in items {
+                let items = &layout_cached(SCALE).items;
+                for &(r, act) in items.iter() {
                     // 分隔线不算可点区域，否则这一小条会拖不动工具条
                     if act != Action::Separator && hit(&r, pt.x, pt.y) {
                         return LRESULT(HTCLIENT as isize);
@@ -855,7 +885,7 @@ unsafe extern "system" fn toolbar_wndproc(
             }
             let x = (lparam.0 & 0xFFFF) as i16 as i32;
             let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
-            let (_, _, items) = layout(SCALE);
+            let items = &layout_cached(SCALE).items;
             let hit_sl = items
                 .iter()
                 .find(|(r, a)| *a == Action::Slider && hit(r, x, y))
@@ -906,7 +936,7 @@ unsafe extern "system" fn toolbar_wndproc(
             }
             if SLIDING && !state_ptr.is_null() {
                 let x = (lparam.0 & 0xFFFF) as i16 as i32;
-                let (_, _, items) = layout(SCALE);
+                let items = &layout_cached(SCALE).items;
                 if let Some((r, _)) = items.iter().find(|(_, a)| *a == Action::Slider) {
                     let r = *r;
                     slider_apply(hwnd, r, x, state_ptr);
@@ -953,7 +983,7 @@ unsafe extern "system" fn toolbar_wndproc(
                     None
                 }
             } else {
-                let (_, _, items) = layout(SCALE);
+                let items = &layout_cached(SCALE).items;
                 items
                     .iter()
                     .find(|(r, _)| hit(r, x, y))
@@ -961,7 +991,7 @@ unsafe extern "system" fn toolbar_wndproc(
             };
 
             if let Some(a) = act {
-                crate::dbg::log(&format!("工具条点击 x={x} y={y} act={a:?}"));
+                crate::dbg::logf!("工具条点击 x={x} y={y} act={a:?}");
                 apply_action(hwnd, a, state_ptr);
             }
             LRESULT(0)
@@ -1031,7 +1061,10 @@ unsafe fn apply_action(hwnd: HWND, act: Action, state_ptr: *const RefCell<AppSta
         Action::Separator => {}    // 分隔线只用来分组
         Action::Undo => {
             let mut st = (*state_ptr).borrow_mut();
-            st.shapes.pop();
+            let n = st.shapes.len();
+            if n > 0 {
+                canvas::remove_shape(&mut *st, n - 1);
+            }
             drop(st);
             canvas::select_none();
         }
@@ -1040,7 +1073,7 @@ unsafe fn apply_action(hwnd: HWND, act: Action, state_ptr: *const RefCell<AppSta
             st.shapes.clear();
             st.number_counter = 0;
             drop(st);
-            canvas::select_none();
+            canvas::reset_shape_indices();
         }
         Action::Select => {
             // 只进不退：点它一定是"进入选择模式并显示画布"，
@@ -1076,7 +1109,7 @@ unsafe fn toggle_expanded(hwnd: HWND) {
     let mut wr = RECT::default();
     GetWindowRect(hwnd, &mut wr);
     // 主图标中心（收纳前后保持不动，避免「跳」）
-    let (_, _, items) = layout(SCALE);
+    let items = &layout_cached(SCALE).items;
     let main_r = items
         .iter()
         .find(|(_, a)| *a == Action::Main)
@@ -1294,7 +1327,7 @@ impl Toolbar {
                 lpfnWndProc: Some(toolbar_wndproc),
                 hInstance: hinstance,
                 hbrBackground: HBRUSH(ptr::null_mut()),
-                hIcon: crate::appicon::load(),
+                hIcon: crate::appicon::shared(),
 
                 lpszClassName: class_name,
                 ..Default::default()

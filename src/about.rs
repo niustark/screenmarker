@@ -300,7 +300,7 @@ pub fn show(hinstance: HINSTANCE) {
             lpfnWndProc: Some(about_wndproc),
             hInstance: hinstance,
             hbrBackground: HBRUSH(ptr::null_mut()),
-            hIcon: crate::appicon::load(),
+            hIcon: crate::appicon::shared(),
             hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(),
             lpszClassName: class_name,
             ..Default::default()

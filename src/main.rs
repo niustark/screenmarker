@@ -80,7 +80,7 @@ unsafe fn claim_single_instance() -> bool {
     }
     if let Err(e) = &mutex {
         // 创建失败（极少见）：降级为不判重，至少保证程序还能用
-        dbg::log(&format!("单实例 Mutex 创建失败，降级运行: {e:?}"));
+        dbg::logf!("单实例 Mutex 创建失败，降级运行: {e:?}");
     }
     // 句柄必须活到进程结束，CloseHandle 会让下一个实例又能「抢到第一」。
     // 放在 static 里，避免被优化提前释放。
@@ -186,7 +186,7 @@ unsafe fn register_class(
         lpfnWndProc: proc,
         hInstance: hinstance,
         hbrBackground: background.unwrap_or(HBRUSH(ptr::null_mut())),
-        hIcon: appicon::load(),
+        hIcon: appicon::shared(),
         lpszClassName: name,
         ..Default::default()
     };

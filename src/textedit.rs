@@ -42,6 +42,27 @@ const WM_RBUTTONDOWN_C: u32 = 0x0204;
 const WM_RBUTTONUP_C: u32 = 0x0205;
 const WM_CONTEXTMENU_C: u32 = 0x007B;
 
+/// 有图元从 `shapes` 里被删除时，同步修正正在编辑的文字框下标。
+/// Vec::remove 会让后面的元素整体前移，漏改会让「提交到另一个图元上」串台。
+/// 状态是本模块的私有 static，所以修正在这里做，由 canvas::remove_shape 调用。
+pub fn shift_shape_index(removed: usize) {
+    unsafe {
+        if TE_SHAPE_IDX == usize::MAX {
+            return;
+        }
+        if TE_SHAPE_IDX == removed {
+            TE_SHAPE_IDX = usize::MAX;
+        } else if TE_SHAPE_IDX > removed {
+            TE_SHAPE_IDX -= 1;
+        }
+    }
+}
+
+/// 画布被整体清空时调用。
+pub fn reset_shape_index() {
+    unsafe { TE_SHAPE_IDX = usize::MAX; }
+}
+
 /// 输入框内右键：DOWN 先吞掉（不让 EDIT 进入系统右键菜单流程），
 /// UP / CONTEXTMENU 时再提交关闭。放在 UP 提交是为了避免鼠标抬起
 /// 落到已被销毁窗口下面的画布上，触发画布自己的右键逻辑。
@@ -271,7 +292,7 @@ unsafe fn commit_and_close(hwnd: HWND) {
                 let mut st = (*state_ptr).borrow_mut();
                 if idx < st.shapes.len() {
                     if text.trim().is_empty() {
-                        st.shapes.remove(idx);
+                        crate::canvas::remove_shape(&mut *st, idx);
                     } else if let Shape::Text {
                         rect,
                         text: t,
@@ -297,7 +318,7 @@ unsafe fn commit_and_close(hwnd: HWND) {
             } else {
                 crate::canvas::select_none();
             }
-            crate::dbg::log(&format!("文字提交 idx={idx} kept={kept}"));
+            crate::dbg::logf!("文字提交 idx={idx} kept={kept}");
             crate::canvas::repaint_global();
         }
         TE_MODE = Mode::Text;
@@ -439,7 +460,7 @@ pub fn open_watermark(hinstance: HINSTANCE, initial: &str, state: Rc<RefCell<App
             lpfnWndProc: Some(te_wndproc),
             hInstance: hinstance,
             hbrBackground: HBRUSH(ptr::null_mut()),
-            hIcon: crate::appicon::load(),
+            hIcon: crate::appicon::shared(),
             lpszClassName: class,
             ..Default::default()
         };
@@ -475,7 +496,7 @@ pub fn open_watermark(hinstance: HINSTANCE, initial: &str, state: Rc<RefCell<App
         ) {
             Ok(h) => h,
             Err(e) => {
-                crate::dbg::log(&format!("创建水印输入框失败: {e:?}"));
+                crate::dbg::logf!("创建水印输入框失败: {e:?}");
                 TE_MODE = Mode::Text;
                 return;
             }
@@ -499,7 +520,7 @@ pub fn open_watermark(hinstance: HINSTANCE, initial: &str, state: Rc<RefCell<App
         ) {
             Ok(h) => h,
             Err(e) => {
-                crate::dbg::log(&format!("创建水印 EDIT 失败: {e:?}"));
+                crate::dbg::logf!("创建水印 EDIT 失败: {e:?}");
                 let _ = DestroyWindow(hwnd);
                 TE_MODE = Mode::Text;
                 return;
@@ -569,7 +590,7 @@ pub fn open(
             lpfnWndProc: Some(te_wndproc),
             hInstance: hinstance,
             hbrBackground: HBRUSH(ptr::null_mut()),
-            hIcon: crate::appicon::load(),
+            hIcon: crate::appicon::shared(),
             lpszClassName: class,
             ..Default::default()
         };
@@ -581,7 +602,7 @@ pub fn open(
         let w = (rect.w as i32 - PAD * 2).max(60);
         let h = (rect.h as i32 - PAD * 2).max(28);
 
-        crate::dbg::log(&format!("textedit::open rect=({},{},{},{})", rect.x, rect.y, rect.w, rect.h));
+        crate::dbg::logf!("textedit::open rect=({},{},{},{})", rect.x, rect.y, rect.w, rect.h);
         let hwnd = match CreateWindowExW(
             WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
             class,
@@ -598,11 +619,11 @@ pub fn open(
         ) {
             Ok(h) => h,
             Err(e) => {
-                crate::dbg::log(&format!("创建文字框窗口失败: {e:?}"));
+                crate::dbg::logf!("创建文字框窗口失败: {e:?}");
                 return;
             }
         };
-        crate::dbg::log(&format!("文字框窗口已创建 {hwnd:?}"));
+        crate::dbg::logf!("文字框窗口已创建 {hwnd:?}");
         TE_HWND = hwnd;
 
         let edit = match CreateWindowExW(
@@ -623,12 +644,12 @@ pub fn open(
         ) {
             Ok(h) => h,
             Err(e) => {
-                crate::dbg::log(&format!("创建 EDIT 控件失败: {e:?}"));
+                crate::dbg::logf!("创建 EDIT 控件失败: {e:?}");
                 let _ = DestroyWindow(hwnd);
                 return;
             }
         };
-        crate::dbg::log(&format!("EDIT 控件已创建 {edit:?}"));
+        crate::dbg::logf!("EDIT 控件已创建 {edit:?}");
         TE_EDIT = edit;
         TE_OPEN_AT = Some(std::time::Instant::now());
         // 子类化 EDIT，拦截 Esc
@@ -681,9 +702,9 @@ pub fn open(
         // SetFocus 在 SetForegroundWindow 失败时会静默失败，
         // 那就等于编辑框永远收不到键盘
         let focus_res = SetFocus(edit);
-        crate::dbg::log(&format!(
+        crate::dbg::logf!(
             "SetForegroundWindow={ok_fg} SetFocus={focus_res:?}"
-        ));
+        );
         // 全选，方便直接覆盖输入
         SendMessageW(edit, 0x00B1u32, WPARAM(0), LPARAM(-1)); // EM_SETSEL
     }

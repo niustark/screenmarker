@@ -200,9 +200,15 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
         let is_down = wparam.0 as u32 == WM_KEYDOWN || wparam.0 as u32 == WM_SYSKEYDOWN;
         let is_up = wparam.0 as u32 == WM_KEYUP || wparam.0 as u32 == WM_SYSKEYUP;
         if is_up {
-            SPACE_LATCH = false;
-            ESC_LATCH = false;
-            DEL_LATCH = false;
+            // 只清「抬起的那颗键」对应的闩锁。任意键 keyup 都把三个闩锁全清，
+            // 会让按住右侧 Ctrl 时敲别的键提前复位 Ctrl 闩锁，下一次自动重复
+            // 又被当成新手势 → 工具条来回抖动。
+            match kb.vkCode {
+                VK_RCTRL => SPACE_LATCH = false,
+                VK_ESCAPE => ESC_LATCH = false,
+                VK_DELETE | VK_BACK => DEL_LATCH = false,
+                _ => {}
+            }
         }
 
         // 右侧 Ctrl：收纳 / 展开工具条（替代原来的空格）
@@ -264,14 +270,14 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
             if fresh {
                 DEL_LATCH = true;
                 let ours = DEL_OWNED_BY_US && !crate::textedit::is_typing();
-                if std::env::var_os("SM_LOG").is_some() {
-                    crate::dbg::log(&format!(
+                if crate::dbg::enabled() {
+                    crate::dbg::logf!(
                         "删除键 vk={:#x} ours={} lastClickOurs={} typing={}",
                         kb.vkCode,
                         ours,
                         DEL_OWNED_BY_US,
                         crate::textedit::is_typing()
-                    ));
+                    );
                 }
                 // 只有真的删掉了图元才吞掉按键：否则在 PPT / Word 里选中对象时
                 // 按 Del 会连别人的内容一起删掉。没删成则原样放行。
@@ -319,11 +325,11 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
                 let visible = !canvas_hwnd.is_invalid()
                     && IsWindowVisible(canvas_hwnd).as_bool();
                 let handle = expanded && !through && active && visible;
-                if std::env::var_os("SM_LOG").is_some() {
-                    crate::dbg::log(&format!(
+                if crate::dbg::enabled() {
+                    crate::dbg::logf!(
                         "滚轮 delta={} tool={:?} 展开={} 穿透={} 可见={} 处理={}",
                         delta, tool, expanded, through, visible, handle
-                    ));
+                    );
                 }
                 if handle {
                     // 滚轮分工：
