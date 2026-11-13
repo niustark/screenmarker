@@ -1,6 +1,0 @@
-{
-  "_说明": "复制本文件为 lanzou_config.json 后填写。cookie 与 folder_id 都是蓝奏云网页版里的值。",
-  "cookie": "粘贴浏览器里完整的 Cookie（形如 phpdisk_info=xxxx; ...）",
-  "folder_id": "-1",
-  "_folder_id_说明": "目标文件夹 ID，根目录填 -1；进入某文件夹后可从 URL 的 folder_id 参数取到"
-}

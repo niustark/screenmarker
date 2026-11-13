@@ -15,11 +15,7 @@ dbg*.log
 # 临时文件
 /1
 
-# 蓝奏云上传凭据（含 Cookie，严禁入库）
-/tools/lanzou_config.json
-
-# 取 Cookie 用的独立浏览器配置目录
-/tools/.lanzou_profile/
-
 # 本机构建+发布快捷脚本（含本机绝对路径）
+# 蓝奏云上传已抽成通用工具 D:\Tools\lanzou\lanzou.py，
+# 凭据与浏览器 profile 都在那边，不再入库本仓库。
 /tools/build_publish.bat
