@@ -23,6 +23,7 @@ mod canvas;
 mod textedit;
 mod cursor;
 mod about;
+mod ghlogo;
 
 use shape::*;
 use toolbar::Toolbar;

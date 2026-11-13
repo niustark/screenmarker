@@ -1,7 +1,7 @@
 // 「关于」小窗口：软件名 + 版本号 + GitHub 图标按钮（点击跳转项目页）。
 //
-// GitHub 图标用真实 PNG（github.png）嵌入 exe，GDI+ 从内存流加载绘制，
-// 保证透明背景和原图质感，同时 exe 仍是单文件。
+// GitHub 图标由官方 Octocat 矢量路径经 GDI+ 直接绘制（见 ghlogo.rs），
+// 不依赖任何图片文件。
 //
 // 所有尺寸都写成 96 DPI 下的「基准值」，实际绘制时乘以 SCALE，
 // 这样在 125% / 150% 缩放下窗口和文字不会被系统拉伸变糊。
@@ -14,12 +14,8 @@ use windows::core::*;
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::Graphics::GdiPlus::{
-    GdipCreateBitmapFromStream, GdipCreateFromHDC, GdipDeleteGraphics, GdipDisposeImage,
-    GdipDrawImageRectI, GdipSetInterpolationMode, GdiplusStartup,
-    GdiplusStartupInput, GpBitmap, GpGraphics, GpImage, InterpolationModeHighQualityBicubic,
+    GdipCreateFromHDC, GdipDeleteGraphics, GdiplusStartup, GdiplusStartupInput, GpGraphics,
 };
-use windows::Win32::System::Com::StructuredStorage::CreateStreamOnHGlobal;
-use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GHND};
 use windows::Win32::UI::HiDpi::GetDpiForSystem;
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::*;
@@ -37,9 +33,6 @@ const BASE_DIV_Y: i32 = 94;
 const BASE_HINT_H: i32 = 20;
 
 const GITHUB_URL: &str = "https://github.com/niustark/screenmarker";
-
-/// 嵌入的 GitHub 图标（透明背景 PNG，64×64）
-const GITHUB_PNG: &[u8] = include_bytes!("../github.png");
 
 static mut ABOUT_HWND: usize = 0;
 static mut GH_HOVER: bool = false;
@@ -122,62 +115,19 @@ fn font(px: i32, weight: i32) -> HFONT {
     }
 }
 
-/// 用 GDI+ 从内嵌 PNG 加载出位图（失败返回 null）。调用方负责 GdipDisposeImage。
-unsafe fn load_github_bitmap() -> *mut GpBitmap {
-    if !gdi_ready() {
-        return ptr::null_mut();
-    }
-    let len = GITHUB_PNG.len();
-    if len == 0 {
-        return ptr::null_mut();
-    }
-    // 分配全局内存，把 PNG 字节拷进去，再包成 IStream 给 GDI+ 解码。
-    let Ok(hg) = GlobalAlloc(GHND, len) else {
-        return ptr::null_mut();
-    };
-    let dst = GlobalLock(hg);
-    if dst.is_null() {
-        let _ = GlobalUnlock(hg);
-        return ptr::null_mut();
-    }
-    ptr::copy_nonoverlapping(GITHUB_PNG.as_ptr(), dst as *mut u8, len);
-    let _ = GlobalUnlock(hg);
-
-    let Ok(stream) = CreateStreamOnHGlobal(hg, true) else {
-        return ptr::null_mut();
-    };
-
-    let mut bmp: *mut GpBitmap = ptr::null_mut();
-    if GdipCreateBitmapFromStream(&stream, &mut bmp).0 != 0 || bmp.is_null() {
-        return ptr::null_mut();
-    }
-    bmp
-}
-
-/// 在目标矩形内绘制 GitHub 图标：让 PNG 里的实心圆正好填满 r。
-///
-/// github.png 是 64×64，内容（黑圆）只占 7..56，四周各留约 7px 透明边。
-/// 所以绘制尺寸要按 64/50 放大，圆的边缘才刚好贴合目标矩形。
+/// 在目标矩形内绘制 GitHub 图标：官方矢量路径，GDI+ 直接填充。
 unsafe fn draw_github(hdc: HDC, r: RECT) {
-    let bmp = load_github_bitmap();
-    if bmp.is_null() {
+    if !gdi_ready() {
         return;
     }
-    let mut g: *mut GpGraphics = ptr::null_mut();
+    let mut g: *mut GpGraphics = std::ptr::null_mut();
     if GdipCreateFromHDC(hdc, &mut g).0 == 0 && !g.is_null() {
-        // 高质量降采样，否则 50px 的白猫会糊成一团
-        let _ = GdipSetInterpolationMode(g, InterpolationModeHighQualityBicubic);
-        let sz = (r.right - r.left).min(r.bottom - r.top);
-        let d = ((sz as f32) * 64.0 / 50.0).round() as i32;
-        let dx = r.left + (sz - d) / 2;
-        let dy = r.top + (sz - d) / 2;
-        let _ = GdipDrawImageRectI(g, bmp as *mut GpImage, dx, dy, d, d);
+        crate::ghlogo::draw(g, r);
         let _ = GdipDeleteGraphics(g);
     }
-    let _ = GdipDisposeImage(bmp as *mut GpImage);
 }
 
-/// 画 GitHub 图标按钮：常态就是深色实心圆本身（PNG 自带），
+/// 画 GitHub 图标按钮：常态就是深色实心圆本身（矢量绘制），
 /// 悬浮/按下时在外面加一圈浅色光晕，不再另铺灰底，避免「圈套圈」。
 unsafe fn draw_gh_button(hdc: HDC) {
     let r = gh_rect();
