@@ -15,7 +15,16 @@ dbg*.log
 # 临时文件
 /1
 
-# 本机构建+发布快捷脚本（含本机绝对路径）
-# 蓝奏云上传已抽成通用工具 D:\Tools\lanzou\lanzou.py，
-# 凭据与浏览器 profile 都在那边，不再入库本仓库。
-/tools/build_publish.bat
+# 本仓库只收 Rust 源码（.rs）与构建配置。
+# 调试 / 打包 / 上传过程中产生的其他语言脚本一律不入库：
+# 蓝奏云上传工具在 D:\Tools\lanzou\lanzou.py，发布脚本在 D:\Tools\publish\ScreenMarker.bat。
+*.py
+*.bat
+*.cmd
+*.ps1
+*.psm1
+*.sh
+*.js
+*.ts
+*.vbs
+*.ahk
