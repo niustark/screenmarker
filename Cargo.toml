@@ -1,6 +1,6 @@
 [package]
 name = "screenmarker"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 
 # 构建产物的文件名（Rust 包名保持 ASCII，避免工具链兼容问题）

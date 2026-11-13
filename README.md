@@ -155,7 +155,7 @@ A：这是单文件便携程序，被误报属常见情况。将 exe 添加到�
 
 - **软件名**：画屏点睛
 - **程序文件**：ScreenMarker.exe
-- **版本**：v0.1.0
+- **版本**：v0.1.1
 - **项目主页**：<https://github.com/niustark/screenmarker>
 
 欢迎在 GitHub 上提交 Issue 或参与贡献。
