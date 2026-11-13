@@ -17,7 +17,10 @@
 
 ## 下载
 
-前往 [Releases](https://github.com/niustark/screenmarker/releases) 页面下载 exe 文件，免安装，双击即可运行。
+- **GitHub Releases（推荐）**：[github.com/niustark/screenmarker/releases](https://github.com/niustark/screenmarker/releases)
+- **蓝奏云（国内加速）**：[https://niu19.lanzoue.com/iVHJf4fuvaub](https://niu19.lanzoue.com/iVHJf4fuvaub)
+
+下载 `ScreenMarker.exe`，免安装，双击即可运行。
 
 ---
 
