@@ -603,14 +603,22 @@ unsafe extern "system" fn canvas_wndproc(
             // 拖动期间被合并掉的重绘由下面这次同步 repaint 补上，
             // 先把定时器撤掉，免得紧接着又多提交一帧整屏。
             cancel_pending_repaint(hwnd);
-            // 注意：必须先释放捕获，否则后续所有鼠标消息都会被画布截走，
-            // 工具条按钮就永远点不动了
-            ReleaseCapture();
+            let p = point_of(lparam);
+            let tool = (*state_ptr).borrow().tool;
+            // 折线绘制中（CURRENT_POLY 非空）暂不释放捕获：否则双击的第二拍
+            // （UP1 已释放捕获）会落在画布透明像素上，WM_NCHITTEST=HTTRANSPARENT
+            // 把 WM_LBUTTONDBLCLK 穿透到下层窗口，双击收尾因此失效。
+            // 捕获保留到本折线条 finalize（双击/右键收尾），之后 tool 不再是 Polyline，
+            // 下一次 WM_LBUTTONUP 会走到下面的释放分支。
+            let poly_drawing = tool == Tool::Polyline && !CURRENT_POLY.is_empty();
+            if !poly_drawing {
+                // 非绘制态必须先释放捕获，否则后续所有鼠标消息都会被画布截走，
+                // 工具条按钮就永远点不动了
+                ReleaseCapture();
+            }
             if state_ptr.is_null() {
                 return LRESULT(0);
             }
-            let p = point_of(lparam);
-            let tool = (*state_ptr).borrow().tool;
             match tool {
                 Tool::Mosaic => {
                     // 松手才真正重抓：拖动过程中只是把旧位图拉伸预览
@@ -760,6 +768,8 @@ unsafe extern "system" fn canvas_wndproc(
                 };
                 POLY_RUBBER = None;
                 SELECTED = idx;
+                // 绘制中一直抓着鼠标捕获，收尾后必须释放，否则工具条点不动
+                ReleaseCapture();
                 repaint(hwnd);
                 return LRESULT(0);
             }

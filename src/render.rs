@@ -764,7 +764,7 @@ impl Renderer {
         // 字体、宽字符串、DC 状态只准备一次；原来每个锚点都调 text_angled()，
         // 一帧要 CreateFontW + encode_utf16 十几次。
         unsafe {
-            let font = Self::angled_font(fs as i32, -28.0);
+            let font = Self::angled_font(fs as i32, 28.0);
             let old_font = SelectObject(self.hdc, HGDIOBJ(font.0));
             SetBkMode(self.hdc, TRANSPARENT);
             SetTextColor(self.hdc, Self::gdi_color(c));
