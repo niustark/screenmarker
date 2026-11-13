@@ -40,6 +40,10 @@ UPLOAD_URL = "https://up.woozooo.com/html5up.php"
 LIST_URL = "https://up.woozooo.com/doupload.php"
 REFERER = "https://pc.woozooo.com/mydisk.php"
 
+# 蓝奏云是国内站点，必须直连；一旦走系统代理（如 v2ray 的 10808）会被重置连接。
+S = requests.Session()
+S.trust_env = False
+
 
 def _stdout_utf8() -> None:
     try:
@@ -100,9 +104,11 @@ def upload(path: Path, folder_id: str, cookie: str, timeout: int = 300) -> dict:
         ("size", (None, str(size))),
     ]
     fh = open(path, "rb")
-    parts.append(("file", (path.name, fh, "application/octet-stream")))
+    # 注意：蓝奏网页端 html5up.php 的文件字段名是 upload_file（不是 file），
+    # 写成 file 会被服务端判为「请选择需要上传的文件」。
+    parts.append(("upload_file", (path.name, fh, "application/octet-stream")))
     try:
-        resp = requests.post(
+        resp = S.post(
             UPLOAD_URL, files=parts, headers=headers(cookie), timeout=timeout
         )
     finally:
@@ -134,10 +140,12 @@ def extract_file(data: dict) -> dict:
         item = info if isinstance(info, dict) else {}
 
     file_id = str(item.get("id") or item.get("file_id") or "")
+    # 分享链接用的是 f_id（10 位分享码），不是数字 id
+    share_code = str(item.get("f_id") or "")
     domain = item.get("is_newd") or item.get("dom") or ""
     name = item.get("name_all") or item.get("name") or ""
-    share = f"{domain.rstrip('/')}/{file_id}" if domain and file_id else ""
-    return {"id": file_id, "domain": domain, "name": name, "share_url": share}
+    share = f"{domain.rstrip('/')}/{share_code}" if domain and share_code else ""
+    return {"id": file_id, "f_id": share_code, "domain": domain, "name": name, "share_url": share}
 
 
 def fill_share_url(cookie: str, folder_id: str, file_name: str, cur: dict) -> dict:
@@ -145,9 +153,9 @@ def fill_share_url(cookie: str, folder_id: str, file_name: str, cur: dict) -> di
     if cur.get("share_url"):
         return cur
     try:
-        resp = requests.post(
+        resp = S.post(
             LIST_URL,
-            data={"task": "47", "folder_id": str(folder_id), "pg": "1"},
+            data={"task": "5", "folder_id": str(folder_id), "pg": "1"},
             headers=headers(cookie),
             timeout=60,
         )
@@ -164,13 +172,107 @@ def fill_share_url(cookie: str, folder_id: str, file_name: str, cur: dict) -> di
             continue
         if it.get("name_all") == file_name:
             fid = str(it.get("id") or "")
+            code = str(it.get("f_id") or "")
             dom = it.get("is_newd") or ""
-            if fid and dom:
+            if code and dom:
                 cur["id"] = cur.get("id") or fid
+                cur["f_id"] = cur.get("f_id") or code
                 cur["domain"] = cur.get("domain") or dom
-                cur["share_url"] = f"{dom.rstrip('/')}/{fid}"
+                cur["share_url"] = f"{dom.rstrip('/')}/{code}"
             break
     return cur
+
+
+def list_files(cookie: str, folder_id: str) -> list:
+    """列出文件夹内所有文件（多页拉取）。
+
+    接口实测：task=5 + folder_id + pg 才是「列文件」；
+    task=47 列的是子文件夹，task=3 是删除文件夹（务必别混用）。
+    """
+    out = []
+    for pg in range(1, 11):  # 最多 10 页，够用
+        try:
+            resp = S.post(
+                LIST_URL,
+                data={"task": "5", "folder_id": str(folder_id), "pg": str(pg)},
+                headers=headers(cookie),
+                timeout=60,
+            )
+            data = resp.json()
+        except Exception:
+            break
+        if str(data.get("zt")) == "9":
+            print("[错误] 列目录时登录失效（zt=9），请重新获取 Cookie。", file=sys.stderr)
+            sys.exit(3)
+        items = data.get("text")
+        if not isinstance(items, list) or not items:
+            break
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+            fid = it.get("id") or it.get("file_id")
+            name = it.get("name_all") or it.get("name") or ""
+            if fid:
+                out.append(
+                    {
+                        "id": str(fid),
+                        "name": name,
+                        "size": it.get("size") or "",
+                        "time": it.get("time") or "",
+                    }
+                )
+        if len(items) < 20:  # 不满一页说明到底了
+            break
+    return out
+
+
+def delete_file(cookie: str, file_id: str) -> tuple:
+    """删除单个文件。蓝奏网页端删除走 doupload.php 的 task=6。"""
+    try:
+        resp = S.post(
+            LIST_URL,
+            data={"task": "6", "file_id": str(file_id)},
+            headers=headers(cookie),
+            timeout=60,
+        )
+        data = resp.json()
+    except Exception as e:
+        return False, f"请求异常: {e}"
+    zt = str(data.get("zt"))
+    if zt == "9":
+        return False, "login not"
+    if zt == "1":
+        return True, "ok"
+    return False, json.dumps(data, ensure_ascii=False)[:200]
+
+
+def clean_old(cookie: str, folder_id: str, file_name: str) -> None:
+    """删除同目录下所有同名旧文件，避免每次发布堆积、分享链接混乱。"""
+    files = list_files(cookie, folder_id)
+    targets = [f for f in files if f["name"] == file_name]
+    if not targets:
+        print("[信息] 目录内没有同名旧文件，直接上传。")
+        return
+    print(f"[信息] 发现 {len(targets)} 个同名旧文件，先删除：")
+    failed = 0
+    for f in targets:
+        ok, msg = delete_file(cookie, f["id"])
+        if ok:
+            print(f"       已删除 {f['name']}（id={f['id']}）")
+        else:
+            failed += 1
+            print(f"       [警告] 删除失败 id={f['id']}：{msg}", file=sys.stderr)
+
+    # 复核：重新列一次，确认确实没了
+    remain = [f for f in list_files(cookie, folder_id) if f["name"] == file_name]
+    if remain:
+        print(
+            f"[警告] 仍有 {len(remain)} 个同名文件未删除（删除接口可能已变更）。"
+            "上传会继续，但目录里会有重复文件。",
+            file=sys.stderr,
+        )
+    elif not failed:
+        print("[信息] 旧文件已清空。")
 
 
 def main() -> int:
@@ -179,6 +281,7 @@ def main() -> int:
     ap.add_argument("file", help="要上传的本地文件路径")
     ap.add_argument("--folder", default=None, help="目标文件夹 ID（默认取配置里的 folder_id）")
     ap.add_argument("--json", action="store_true", help="只输出 JSON 结果，便于其他脚本调用")
+    ap.add_argument("--keep-old", action="store_true", help="不删除同名旧文件，直接上传")
     args = ap.parse_args()
 
     path = Path(args.file).expanduser().resolve()
@@ -190,7 +293,15 @@ def main() -> int:
     folder_id = str(args.folder or cfg["folder_id"])
 
     if not args.json:
-        print(f"[信息] 上传 {path.name}（{path.stat().st_size} 字节）→ 目录 {folder_id} …")
+        print(f"[信息] 目标目录 {folder_id}，文件 {path.name}（{path.stat().st_size} 字节）")
+
+    if not args.keep_old:
+        clean_old(cfg["cookie"], folder_id, path.name)
+    elif not args.json:
+        print("[信息] 已指定 --keep-old，跳过删除旧文件。")
+
+    if not args.json:
+        print("[信息] 开始上传 …")
 
     data = upload(path, folder_id, cfg["cookie"])
     result = extract_file(data)
