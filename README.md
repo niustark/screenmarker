@@ -17,13 +17,13 @@
 
 ## 下载
 
-前往 [Releases](https://github.com/niustark/screenmarker/releases) 页面下载 exe 文件，免安装，双击即可运行。
+前往 [Releases](https://github.com/niustark/screenmarker/releases) 页面下载 **画屏点睛.exe**，免安装，双击即可运行。
 
 ---
 
 ## 快速开始
 
-1. 双击运行 exe。
+1. 双击运行 **画屏点睛.exe**。
 2. 屏幕上出现一个**半透明的铅笔图标**（收纳态）。
 3. 点击该图标（或按右侧 `Ctrl`）展开工具条，默认已选中「荧光笔」，直接在屏幕上拖动即可划重点。
 4. 想换工具就点对应按钮（如「画笔」「矩形」），再在屏幕上拖动画出。
@@ -154,6 +154,7 @@ A：这是单文件便携程序，被误报属常见情况。将 exe 添加到�
 ## 关于本项目
 
 - **软件名**：画屏点睛
+- **程序文件**：画屏点睛.exe
 - **版本**：v0.1.0
 - **项目主页**：<https://github.com/niustark/screenmarker>
 

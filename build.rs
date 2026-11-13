@@ -1,9 +1,8 @@
-// 把 app.ico 作为 RT_GROUP_ICON 直接链接进 exe。
+// 把 app.ico 作为 RT_GROUP_ICON 在链接期直接嵌进 exe。
 //
-// 以前只在 build.bat 里用 Python 脚本事后改 PE，一旦直接 `cargo build`
-// 就会重新链接、把图标资源丢掉（资源段变空，资源管理器显示默认图标）。
-// 这里在链接期就把 .res 交给链接器，任何构建方式都不会再丢。
-// 找不到 windres 时静默跳过，由 build.bat 里的 Rust 工具 seticon 兜底，不影响编译。
+// 由 GNU 资源编译器 windres 生成 .res，再交给链接器合并进 .rsrc。
+// 因此一条 `cargo build --release` 就能产出自带图标的程序，
+// 不需要额外的构建脚本，也不需要在编译后改写 PE。
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -43,5 +42,5 @@ fn main() {
             return;
         }
     }
-    println!("cargo:warning=windres 不可用：图标将由 build.bat 的 seticon (Rust) 在构建后写入");
+    println!("cargo:warning=windres 不可用：本次构建不会嵌入程序图标（不影响功能）");
 }
