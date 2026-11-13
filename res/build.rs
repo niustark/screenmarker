@@ -1,18 +1,20 @@
-// 把 app.ico 作为 RT_GROUP_ICON 在链接期直接嵌进 exe。
+// 把 res/app.ico 作为 RT_GROUP_ICON 在链接期直接嵌进 exe。
 //
 // 由 GNU 资源编译器 windres 生成 .res，再交给链接器合并进 .rsrc。
 // 因此一条 `cargo build --release` 就能产出自带图标的程序，
 // 不需要额外的构建脚本，也不需要在编译后改写 PE。
+//
+// 注意：下面的路径都相对「包根」（CARGO_MANIFEST_DIR），不是相对本文件所在的 res/。
 
 use std::path::PathBuf;
 use std::process::Command;
 
 fn main() {
-    println!("cargo:rerun-if-changed=app.ico");
+    println!("cargo:rerun-if-changed=res/app.ico");
 
     let manifest = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
     let out = PathBuf::from(std::env::var("OUT_DIR").unwrap());
-    let ico = manifest.join("app.ico");
+    let ico = manifest.join("res").join("app.ico");
     let rc_path = out.join("app_icon.rc");
     let res_path = out.join("app_icon.res");
 

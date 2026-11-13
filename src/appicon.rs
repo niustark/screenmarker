@@ -8,7 +8,7 @@ use std::sync::OnceLock;
 
 use windows::Win32::UI::WindowsAndMessaging::*;
 
-const ICO: &[u8] = include_bytes!("../app.ico");
+const ICO: &[u8] = include_bytes!("../res/app.ico");
 
 /// 从内嵌的 ICO 里挑一个最合适的尺寸，返回 HICON（失败返回 null，调用方可用默认图标）
 pub fn load() -> HICON {
