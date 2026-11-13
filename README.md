@@ -17,13 +17,15 @@
 
 ## 下载
 
-前往 [Releases](https://github.com/niustark/screenmarker/releases) 页面下载 **画屏点睛.exe**，免安装，双击即可运行。
+前往 [Releases](https://github.com/niustark/screenmarker/releases) 页面下载 **HuapingDianjing.exe**，免安装，双击即可运行。
+
+> GitHub 发布附件名只支持 ASCII 字符，因此下载到的是 `HuapingDianjing.exe`；按需重命名为 **画屏点睛.exe** 即可，文件名不影响功能。
 
 ---
 
 ## 快速开始
 
-1. 双击运行 **画屏点睛.exe**。
+1. 双击运行下载到的 exe（可重命名为 **画屏点睛.exe**）。
 2. 屏幕上出现一个**半透明的铅笔图标**（收纳态）。
 3. 点击该图标（或按右侧 `Ctrl`）展开工具条，默认已选中「荧光笔」，直接在屏幕上拖动即可划重点。
 4. 想换工具就点对应按钮（如「画笔」「矩形」），再在屏幕上拖动画出。
