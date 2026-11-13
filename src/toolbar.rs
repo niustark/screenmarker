@@ -835,6 +835,7 @@ unsafe extern "system" fn toolbar_wndproc(
             LRESULT(0)
         }
         WM_LBUTTONDOWN => {
+            crate::hooks::note_our_window_clicked();
             if !EXPANDED {
                 // 收纳态的主图标既能拖走、也能点开：先记下按下位置，
                 // 松手时再看是「拖过」还是「只是点了一下」
@@ -966,6 +967,7 @@ unsafe extern "system" fn toolbar_wndproc(
             LRESULT(0)
         }
         WM_RBUTTONUP => {
+            crate::hooks::note_our_window_clicked();
             // 右键不再弹菜单：
             //   展开态 → 收回主图标（和点主图标一个效果）
             //   收纳态 → 直接退出程序
@@ -1193,6 +1195,32 @@ pub fn collapse_to_icon() {
             return;
         }
         toggle_expanded(HWND(TOOLBAR_HWND as *mut _));
+    }
+}
+
+/// 单实例唤醒：第二个实例启动时广播过来，把「已经跑着的那个」亮出来。
+/// 收纳态 → 展开工具条（用户双击后立刻有反馈）；
+/// 已展开 → 提到 TOPMOST 带最前并重绘（避免它被别的窗口盖住而看不见）。
+pub fn reveal() {
+    unsafe {
+        if TOOLBAR_HWND == 0 {
+            return;
+        }
+        let hwnd = HWND(TOOLBAR_HWND as *mut _);
+        if !EXPANDED {
+            toggle_expanded(hwnd);
+        } else {
+            SetWindowPos(
+                hwnd,
+                HWND_TOPMOST,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+            );
+            InvalidateRect(hwnd, None, true);
+        }
     }
 }
 

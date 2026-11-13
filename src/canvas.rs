@@ -207,6 +207,7 @@ unsafe extern "system" fn canvas_wndproc(
             DefWindowProcW(hwnd, msg, wparam, lparam)
         }
         WM_LBUTTONDOWN => {
+            crate::hooks::note_our_window_clicked();
             if state_ptr.is_null() {
                 return LRESULT(0);
             }
@@ -666,6 +667,7 @@ unsafe extern "system" fn canvas_wndproc(
             LRESULT(0)
         }
         WM_LBUTTONDBLCLK => {
+            crate::hooks::note_our_window_clicked();
             if state_ptr.is_null() {
                 return LRESULT(0);
             }
@@ -717,6 +719,7 @@ unsafe extern "system" fn canvas_wndproc(
             LRESULT(0)
         }
         WM_RBUTTONUP => {
+            crate::hooks::note_our_window_clicked();
             if state_ptr.is_null() {
                 return LRESULT(0);
             }
@@ -2308,9 +2311,33 @@ pub fn apply_watermark() {
     repaint_global();
 }
 
-/// 弹出水印文字输入框（水印内容可自定义）
+/// 弹出水印文字输入框（水印内容可自定义）。
+///
+/// 水印是整屏平铺的全局效果，一个屏幕上只需要一份，所以这里统一把关：
+///   * 屏幕上已经有水印 → 不再弹输入框。点工具/点画布只是回到水印工具，
+///     颜色和字号仍可通过工具条同步到已有水印（sync_watermark）；
+///   * 想换文字 → 右键删掉水印，再点一次水印工具就会重新问；
+///   * 输入框已经开着 → 也不重复弹，避免叠出第二个框。
 pub fn edit_watermark() {
     unsafe {
+        let sp = st_ptr();
+        if !sp.is_null() {
+            let has = (*sp)
+                .borrow()
+                .shapes
+                .iter()
+                .any(|s| matches!(s, Shape::Watermark { .. }));
+            if has {
+                crate::dbg::log("已有水印，跳过输入框");
+                sync_watermark();
+                repaint_global();
+                return;
+            }
+        }
+        if textedit::is_typing() {
+            crate::dbg::log("已有输入框，跳过水印输入框");
+            return;
+        }
         crate::dbg::log("edit_watermark 进入");
         let hinstance = HINSTANCE(CANVAS_HINSTANCE as *mut _);
         let state_rc = match (&*(std::ptr::addr_of!(STATE_RC))).as_ref() {

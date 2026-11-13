@@ -36,6 +36,7 @@ use windows::core::*;
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::System::Threading::CreateMutexW;
 use windows::Win32::UI::HiDpi::{
     SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
@@ -47,8 +48,56 @@ const ID_TRAY: u32 = 1;
 const ID_EXIT: usize = 1;
 const ID_ABOUT: usize = 2;
 
+// 第二个实例用这个广播消息把「已经跑着的那一个」唤出来。
+// RegisterWindowMessage 在同一会话里对同一字符串返回同一个号码，
+// 与 exe 路径 / 文件名无关，多个副本之间也能对得上。
+static mut ACTIVATE_MSG: u32 = 0;
+
+/// 单实例闸门：返回 true 表示「本进程是唯一实例，可以继续启动」。
+/// 返回 false 时已经通知过旧实例，调用方应立刻结束。
+///
+/// 为什么不用进程名 / 窗口标题：exe 可能被复制到多个目录、改成任意名字，
+/// 只有内核命名对象（Mutex）的名字与路径无关。而且它由内核维护引用计数，
+/// 进程崩溃或退出都会自动释放，不会像 PID 文件那样留下「假占用」。
+unsafe fn claim_single_instance() -> bool {
+    // 名字固定，不带版本号：不同版本的本程序也互斥，全机只留一个。
+    // Local\ 是当前登录会话的命名空间，覆盖桌面双击、快捷方式等全部场景，
+    // 普通权限即可创建（Global\ 在部分环境需要额外特权）。
+    let mutex = CreateMutexW(None, BOOL(0), w!("Local\\ScreenMarker_SingleInstance_v1"));
+    // 必须紧跟调用读取：CreateMutex 成功但对象已存在时，last error 才是
+    // ERROR_ALREADY_EXISTS；中间插别的 API 会把这个值冲掉。
+    let already_running = GetLastError() == ERROR_ALREADY_EXISTS;
+    if already_running {
+        dbg::log("检测到已有实例：唤醒旧实例后退出");
+        let msg = RegisterWindowMessageW(w!("ScreenMarker_ActivateInstance_v1"));
+        if msg != 0 {
+            // 广播给所有顶层窗口：只有本程序的托盘窗口认识这个号码。
+            // 唤醒后用户能看到工具条展开，而不是「双击了没反应」。
+            let _ = PostMessageW(HWND_BROADCAST, msg, WPARAM(0), LPARAM(0));
+        }
+        return false;
+    }
+    if let Err(e) = &mutex {
+        // 创建失败（极少见）：降级为不判重，至少保证程序还能用
+        dbg::log(&format!("单实例 Mutex 创建失败，降级运行: {e:?}"));
+    }
+    // 句柄必须活到进程结束，CloseHandle 会让下一个实例又能「抢到第一」。
+    // 放在 static 里，避免被优化提前释放。
+    SINGLETON_HANDLE = mutex.unwrap_or(HANDLE(ptr::null_mut())).0 as usize;
+    ACTIVATE_MSG = RegisterWindowMessageW(w!("ScreenMarker_ActivateInstance_v1"));
+    true
+}
+
+// 只是为了让 Mutex 句柄有一个「活到进程结束」的落脚点，不用于访问。
+static mut SINGLETON_HANDLE: usize = 0;
+
 fn main() -> Result<()> {
     unsafe {
+        // 无论从哪个路径、哪个快捷方式启动，全机只保留一个实例。
+        // 后来的实例会唤醒已运行的那个工具条，然后安静退出。
+        if !claim_single_instance() {
+            return Ok(());
+        }
         // 高分屏下必须声明 DPI 感知，否则系统会「虚拟化」坐标，
         // 鼠标位置和绘制位置对不上（4K 屏上尤其明显）
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
@@ -147,6 +196,12 @@ unsafe fn register_class(
 unsafe extern "system" fn tray_wndproc(
     hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM,
 ) -> LRESULT {
+    // 第二个实例广播过来的「有人又双击了」：把工具条唤出来给用户一个反馈。
+    if ACTIVATE_MSG != 0 && msg == ACTIVATE_MSG {
+        dbg::log("单实例唤醒：已有实例收到第二个实例的广播");
+        toolbar::reveal();
+        return LRESULT(0);
+    }
     match msg {
         WM_TRAYICON => {
             if lparam.0 as u32 == WM_RBUTTONUP {

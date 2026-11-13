@@ -308,6 +308,9 @@ unsafe fn commit_and_close(hwnd: HWND) {
     // 仍留在文字工具，方便接着点下一处继续写。
     if TE_EXIT_TOOL {
         TE_EXIT_TOOL = false;
+        // 右键提交的按下事件已经被低级鼠标钩子清掉了「点击归属」，
+        // 但提交后文字正处于可选中态，紧接着按 Del 应该能删掉它。
+        crate::hooks::note_our_window_clicked();
         if mode == Mode::Text && !state_ptr.is_null() {
             (*state_ptr).borrow_mut().tool = crate::shape::Tool::Select;
             // 工具条的按钮高亮是从 state.tool 读的，改完必须重绘

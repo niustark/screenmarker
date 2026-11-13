@@ -36,6 +36,24 @@ static mut SPACE_LAST: u32 = 0;
 static mut ESC_LAST: u32 = 0;
 static mut DEL_LAST: u32 = 0;
 
+// 删除键的「归属」：最近一次鼠标按下是否落在我们自己的窗口上。
+// 低级鼠标钩子先于窗口消息派发，所以 mouse_proc 里一律先清成 false；
+// 若点击真的落到画布/工具条，它们的窗口过程随后把它置回 true。
+// 穿透态下点在空白处会穿透到下面的程序，我们收不到窗口消息 → 保持 false，
+// Del/Backspace 就原样留给 PPT / 浏览器，不会误删残留的选中图元。
+static mut DEL_OWNED_BY_US: bool = false;
+
+/// 由画布 / 工具条的窗口过程在收到鼠标按下（或右键抬起）时调用。
+pub fn note_our_window_clicked() {
+    unsafe { DEL_OWNED_BY_US = true; }
+}
+
+// 鼠标按下常量自己定义，避免依赖未开启的 windows crate feature。
+// （用 match 分支引用未定义常量会被编译器当成变量绑定，曾导致启动崩溃）
+const WM_LBUTTONDOWN_C: u32 = 0x0201;
+const WM_RBUTTONDOWN_C: u32 = 0x0204;
+const WM_MBUTTONDOWN_C: u32 = 0x0207;
+
 /// 这次按下是否算「新手势」（而不是按住不放产生的自动重复）
 fn is_fresh(latch: bool, last: u32, now: u32) -> bool {
     !latch || now.wrapping_sub(last) > 800
@@ -229,7 +247,14 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
             }
         }
 
-        // Del / Backspace：删掉当前选中的那个图形（打字时让给编辑框）
+        // Del / Backspace：删掉当前选中的那个图形。
+        //
+        // 这里不能复用 keyboard_owned_by_edit()：那套判断原本是给「空格别在
+        // 打字时误触工具条」设计的，会把「前台线程存在有效 hwndCaret」也算成
+        // 输入框。实测 PowerPoint 的 mdiClass 容器在普通浏览状态下就带一个有效
+        // hwndCaret（flags=0、WM_GETDLGCODE=0，其实并没有在编辑文字），于是
+        // PPT 一打开，选中图形后按 Del/Backspace 完全没反应。
+        // 删除是「作用于我们自己选中的图元」的动作，只在我方输入框打字时让路。
         if is_down
             && (kb.vkCode == VK_DELETE || kb.vkCode == VK_BACK)
             && !state_ptr.is_null()
@@ -238,8 +263,20 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
             DEL_LAST = kb.time;
             if fresh {
                 DEL_LATCH = true;
-                if !keyboard_owned_by_edit() {
-                    crate::canvas::delete_selected();
+                let ours = DEL_OWNED_BY_US && !crate::textedit::is_typing();
+                if std::env::var_os("SM_LOG").is_some() {
+                    crate::dbg::log(&format!(
+                        "删除键 vk={:#x} ours={} lastClickOurs={} typing={}",
+                        kb.vkCode,
+                        ours,
+                        DEL_OWNED_BY_US,
+                        crate::textedit::is_typing()
+                    ));
+                }
+                // 只有真的删掉了图元才吞掉按键：否则在 PPT / Word 里选中对象时
+                // 按 Del 会连别人的内容一起删掉。没删成则原样放行。
+                if ours && crate::canvas::delete_selected() {
+                    return LRESULT(1);
                 }
             }
         }
@@ -248,27 +285,40 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
 }
 
 unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    // 滚轮：调线宽。只在画布可见、且已选了工具时生效，
-    // 否则用户在普通窗口里滚动页面也会被我们改掉粗细。
-    if code >= 0 && wparam.0 as u32 == WM_MOUSEWHEEL {
-        let state_ptr = G_STATE_PTR as *const RefCell<AppState>;
-        if !state_ptr.is_null() {
-            let ms = &*(lparam.0 as *const MSLLHOOKSTRUCT);
-            // mouseData 的高 16 位是有符号滚轮增量
-            let delta = ((ms.mouseData >> 16) & 0xFFFF) as u16 as i16;
-            let canvas_hwnd = HWND(G_CANVAS_PTR as *mut _);
-            let tool = (*state_ptr).borrow().tool;
-            let active = tool != crate::shape::Tool::None;
-            if active && !canvas_hwnd.is_invalid() && IsWindowVisible(canvas_hwnd).as_bool() {
-                // 滚轮分工：
-                //   放大镜/聚光灯  → 调取景范围（半径）
-                //   放大镜 + Ctrl  → 调放大倍率
-                //   马赛克         → 调区域大小（重新抓屏打码）
-                //   选择态         → 看选中的是什么，套用上面同一套
-                //   其它工具       → 调线宽/字号（序号的大小也由线宽派生）
-                let ctrl = (GetKeyState(VK_CONTROL.0 as i32) as u16 & 0x8000) != 0;
-                if !canvas::handle_wheel(delta > 0, ctrl) {
-                    crate::toolbar::adjust_width(if delta > 0 { 1.0 } else { -1.0 });
+    if code >= 0 {
+        let mouse_msg = wparam.0 as u32;
+        // 任何一次鼠标按下，先假定「这次点击是给下面那个程序的」。
+        // 钩子回调发生在系统把消息派发给目标窗口之前：若点击真的落到画布 /
+        // 工具条，它们的窗口过程随后会调 note_our_window_clicked() 置回 true；
+        // 穿透到下面程序的点击（穿透态空白区域）则永远保持 false。
+        if mouse_msg == WM_LBUTTONDOWN_C
+            || mouse_msg == WM_RBUTTONDOWN_C
+            || mouse_msg == WM_MBUTTONDOWN_C
+        {
+            DEL_OWNED_BY_US = false;
+        }
+        // 滚轮：调线宽。只在画布可见、且已选了工具时生效，
+        // 否则用户在普通窗口里滚动页面也会被我们改掉粗细。
+        if mouse_msg == WM_MOUSEWHEEL {
+            let state_ptr = G_STATE_PTR as *const RefCell<AppState>;
+            if !state_ptr.is_null() {
+                let ms = &*(lparam.0 as *const MSLLHOOKSTRUCT);
+                // mouseData 的高 16 位是有符号滚轮增量
+                let delta = ((ms.mouseData >> 16) & 0xFFFF) as u16 as i16;
+                let canvas_hwnd = HWND(G_CANVAS_PTR as *mut _);
+                let tool = (*state_ptr).borrow().tool;
+                let active = tool != crate::shape::Tool::None;
+                if active && !canvas_hwnd.is_invalid() && IsWindowVisible(canvas_hwnd).as_bool() {
+                    // 滚轮分工：
+                    //   放大镜/聚光灯  → 调取景范围（半径）
+                    //   放大镜 + Ctrl  → 调放大倍率
+                    //   马赛克         → 调区域大小（重新抓屏打码）
+                    //   选择态         → 看选中的是什么，套用上面同一套
+                    //   其它工具       → 调线宽/字号（序号的大小也由线宽派生）
+                    let ctrl = (GetKeyState(VK_CONTROL.0 as i32) as u16 & 0x8000) != 0;
+                    if !canvas::handle_wheel(delta > 0, ctrl) {
+                        crate::toolbar::adjust_width(if delta > 0 { 1.0 } else { -1.0 });
+                    }
                 }
             }
         }
