@@ -2508,6 +2508,9 @@ impl Canvas {
         unsafe {
             let class_name = w!("ScreenMarkerCanvas");
             let wc = WNDCLASSW {
+                // CS_DBLCLKS 必须：否则双击只会收到两次 WM_LBUTTONDOWN，
+                // 收不到 WM_LBUTTONDBLCLK，折线双击收尾 / 文字双击重编辑都会失效。
+                style: CS_DBLCLKS,
                 lpfnWndProc: Some(canvas_wndproc),
                 hInstance: hinstance,
                 hbrBackground: HBRUSH(ptr::null_mut()),
