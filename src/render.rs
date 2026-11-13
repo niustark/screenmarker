@@ -225,9 +225,9 @@ impl Renderer {
                 0,
                 0,
                 DEFAULT_CHARSET.0 as u32,
+                OUT_TT_ONLY_PRECIS.0 as u32, // 强制 TrueType 轮廓字体，旋转 + 抗锯齿才稳
                 0,
-                0,
-                0,
+                ANTIALIASED_QUALITY.0 as u32, // 灰度抗锯齿：去掉旋转文字的锯齿边
                 0,
                 w!("Microsoft YaHei"),
             )
