@@ -36,7 +36,7 @@
 ## 功能一览
 
 工具条分上下两行：**上行是 13 个绘制工具**，**下行是颜色、粗细调节与常用操作**。
-![工具条展开态](toolbar.png)
+![工具条展开态](https://1812974250.cdn.123clouddisk.com/1812974250/ymjew503t0l000dlnm5t0d0131k9so84DIYPDqr0AdiyDcxwBIQv.png)
 <table>
 <thead>
 <tr><th width="110">工具</th><th>说明</th></tr>
@@ -153,7 +153,7 @@ A：这是单文件便携程序，被误报属常见情况。将 exe 添加到�
 
 - **软件名**：画屏点睛
 - **程序文件**：ScreenMarker.exe
-- **版本**：v0.1.3
+- **版本**：v0.1.4
 - **项目主页**：<https://github.com/niustark/screenmarker>
 
 欢迎在 GitHub 上提交 Issue 或参与贡献。
