@@ -2489,7 +2489,7 @@ pub fn edit_watermark() {
         let cur = {
             let sp = st_ptr();
             if sp.is_null() {
-                "WATERMARK".to_string()
+                "画屏点睛".to_string()
             } else {
                 (*sp).borrow().watermark_text.clone()
             }

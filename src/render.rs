@@ -754,9 +754,8 @@ impl Renderer {
         // 用 self.col 让「占位色绘制」时水印文字也变成占位色，
         // 之后统一替换成「真色 + 半透明 alpha」
         let c = self.col(color).with_alpha(110);
-        // 45° 斜排：文字从锚点向右上方延伸，所以网格要往左下多铺一些，
-        // 否则屏幕右上角会缺一块。
-        // 铺的间距按字号等比放大，字号一改密度才不会挤成一团或稀稀拉拉。
+        // -28° 斜排（顺时针 28°，基线向右下方延伸）：铺的间距按字号等比放大，
+        // 字号一改密度才不会挤成一团或稀稀拉拉。
         // 但要给间距封顶：字号拉到最大时等比算出来的间距是三四千像素，
         // 整屏只剩一两处水印，看着像没铺。封到 1/3 屏就始终有 3×3 覆盖。
         let fs = size.max(8.0);
@@ -765,7 +764,7 @@ impl Renderer {
         // 字体、宽字符串、DC 状态只准备一次；原来每个锚点都调 text_angled()，
         // 一帧要 CreateFontW + encode_utf16 十几次。
         unsafe {
-            let font = Self::angled_font(fs as i32, 45.0);
+            let font = Self::angled_font(fs as i32, -28.0);
             let old_font = SelectObject(self.hdc, HGDIOBJ(font.0));
             SetBkMode(self.hdc, TRANSPARENT);
             SetTextColor(self.hdc, Self::gdi_color(c));

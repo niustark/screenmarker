@@ -422,7 +422,7 @@ impl AppState {
             width: 4.0,
             shapes: Vec::new(),
             number_counter: 0,
-            watermark_text: "WATERMARK".to_string(),
+            watermark_text: "画屏点睛".to_string(),
             text_editing: false,
         }
     }
