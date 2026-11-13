@@ -297,8 +297,14 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
         {
             DEL_OWNED_BY_US = false;
         }
-        // 滚轮：调线宽。只在画布可见、且已选了工具时生效，
+        // 滚轮：调线宽。只在「工具条展开 + 非穿透态 + 已选工具 + 画布可见」时生效，
         // 否则用户在普通窗口里滚动页面也会被我们改掉粗细。
+        //
+        // 收纳态原先 tool = Select，被这里当成「工具仍激活」，于是每滚一格都在
+        // 偷偷调线宽并整屏重绘（UpdateLayeredWindow）；穿透态的画布又靠
+        // HTTRANSPARENT 让位，反复重绘会反复触发命中测试，Windows 为此播放
+        // 默认提示音 —— 表现就是「收纳状态下滚动鼠标会蜂鸣」。
+        // 现在收纳态 tool 已是 None，再加这道闸门防止别的路径把它设回去。
         if mouse_msg == WM_MOUSEWHEEL {
             let state_ptr = G_STATE_PTR as *const RefCell<AppState>;
             if !state_ptr.is_null() {
@@ -308,7 +314,18 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
                 let canvas_hwnd = HWND(G_CANVAS_PTR as *mut _);
                 let tool = (*state_ptr).borrow().tool;
                 let active = tool != crate::shape::Tool::None;
-                if active && !canvas_hwnd.is_invalid() && IsWindowVisible(canvas_hwnd).as_bool() {
+                let expanded = crate::toolbar::is_expanded();
+                let through = crate::canvas::is_click_through();
+                let visible = !canvas_hwnd.is_invalid()
+                    && IsWindowVisible(canvas_hwnd).as_bool();
+                let handle = expanded && !through && active && visible;
+                if std::env::var_os("SM_LOG").is_some() {
+                    crate::dbg::log(&format!(
+                        "滚轮 delta={} tool={:?} 展开={} 穿透={} 可见={} 处理={}",
+                        delta, tool, expanded, through, visible, handle
+                    ));
+                }
+                if handle {
                     // 滚轮分工：
                     //   放大镜/聚光灯  → 调取景范围（半径）
                     //   放大镜 + Ctrl  → 调放大倍率

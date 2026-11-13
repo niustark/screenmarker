@@ -221,12 +221,13 @@ unsafe extern "system" fn canvas_wndproc(
             SetCapture(hwnd);
             let tool = (*state_ptr).borrow().tool;
             match tool {
-                Tool::None => {}
                 Tool::Eraser => {
                     let mut st = (*state_ptr).borrow_mut();
                     erase_at(&mut st, p);
                 }
-                Tool::Select => {
+                // 收纳态的 tool 是 None（不是 Select），两者都按「选择 / 编辑」处理，
+                // 这样收起工具条后仍可点选、拖动已画好的图元。
+                Tool::None | Tool::Select => {
                     // 按下：优先抓已选中图元的手柄 → 缩放；框内 → 移动；否则重新选。
                     // 点在空白处 = 「我不画了」：取消选中、退出当前功能、工具条收进主图标、
                     // 焦点还给下面窗口。但画布和已经画好的图案必须继续显示 ——
@@ -464,7 +465,7 @@ unsafe extern "system" fn canvas_wndproc(
                     drop(st);
                     repaint(hwnd);
                 }
-                Tool::Select => {
+                Tool::None | Tool::Select => {
                     let changed = {
                         let mut st = (*state_ptr).borrow_mut();
                         edit_drag(&mut st, p)
@@ -608,7 +609,7 @@ unsafe extern "system" fn canvas_wndproc(
                         }
                     }
                 }
-                Tool::Select => {
+                Tool::None | Tool::Select => {
                     // 松手：结束拖动；马赛克被拉过大小要重抓一次，否则糊着
                     let refresh = {
                         let mut st = (*state_ptr).borrow_mut();
@@ -634,7 +635,7 @@ unsafe extern "system" fn canvas_wndproc(
                 Tool::Polyline => {
                     POLY_RUBBER = Some(p);
                 }
-                Tool::Eraser | Tool::None => {}
+                Tool::Eraser => {}
                 _ => {
                     let mut st = (*state_ptr).borrow_mut();
                     end_draw(&mut st, p);
@@ -1576,15 +1577,17 @@ pub fn delete_selected() -> bool {
 /// 用在「右键退出工具后，左键点了空白处」以及「选择态下再点右键」。
 /// 以前这些地方直接调 exit_markup()，它在工具条展开时会 SW_HIDE 整层画布，
 /// 图形虽然还在 state 里，屏幕上却全没了 —— 用户看到的就是「图案消失了」。
-/// 现在统一走这里：只收工具条、切回选择态，画面原样留在屏幕上，
-/// 鼠标随后还能点选/拖动任意一个已画好的图元。
+/// 现在统一走这里：只收工具条、切回空工具态（None，画布里与 Select 一样
+/// 支持点选/拖动），画面原样留在屏幕上，鼠标随后还能点选/拖动任意已画好的图元。
+/// 用 None 而不是 Select：全局滚轮钩子靠 tool != None 判断「工具是否激活」，
+/// 收纳态留着 Select 会让每格滚轮都偷偷调线宽并重绘整屏。
 ///
 /// 同时进入「穿透态」：空白区域点击穿透到下面的程序，画了内容的像素仍拦截。
 pub fn keep_canvas_exit() {
     let sp = st_ptr();
     if !sp.is_null() {
         let mut st = unsafe { (*sp).borrow_mut() };
-        st.tool = Tool::Select;
+        st.tool = Tool::None;
     }
     reset_transient();
     select_none();
@@ -1646,10 +1649,11 @@ pub fn exit_markup() {
     let sp = st_ptr();
     let collapsed = !crate::toolbar::is_expanded();
     if collapsed {
-        // 收纳态：保留画面，只退出工具
+        // 收纳态：保留画面，工具切成 None（画布里 None 与 Select 一样可点选/拖动，
+        // 但不会让全局滚轮钩子误以为「还有工具在激活」）。
         if !sp.is_null() {
             let mut st = unsafe { (*sp).borrow_mut() };
-            st.tool = Tool::Select;
+            st.tool = Tool::None;
         }
         reset_transient();
         select_none();

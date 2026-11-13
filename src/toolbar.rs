@@ -1159,8 +1159,10 @@ unsafe fn toggle_expanded(hwnd: HWND) {
         crate::textedit::commit_open();
 
         // 收纳 = 不再「正在画某个图形」。
-        // 画面留着（用户要能看到自己画的东西），但工具切到「选择」，
-        // 这样鼠标落到画布上就是点选/拖动已有图元，而不是继续往上画。
+        // 画面留着（用户要能看到自己画的东西），工具切到 None：
+        // 画布里 None 与 Select 走同一套点选/拖动逻辑，功能不变；
+        // 但全局滚轮钩子用 tool != None 判断「工具是否激活」，若留 Select，
+        // 收纳后每滚一格都会偷偷调线宽并整屏重绘，还会触发系统提示音。
         // 注意：整体退出标注时画布已经被隐藏了，那种情况不要动状态。
         let canvas = HWND(TOOLBAR_CANVAS as *mut _);
         if !canvas.is_invalid() && IsWindowVisible(canvas).as_bool() {
@@ -1168,8 +1170,8 @@ unsafe fn toggle_expanded(hwnd: HWND) {
             if !state_ptr.is_null() {
                 let changed = {
                     let mut st = (*state_ptr).borrow_mut();
-                    if st.tool != Tool::Select {
-                        st.tool = Tool::Select;
+                    if st.tool != Tool::None {
+                        st.tool = Tool::None;
                         true
                     } else {
                         false
@@ -1180,8 +1182,8 @@ unsafe fn toggle_expanded(hwnd: HWND) {
                 }
             }
         }
-        // 收纳后工具已经切成「选择」，光标也就不该再是橡皮擦
-        crate::cursor::apply(Tool::Select);
+        // 收纳后不该再是橡皮擦，换回普通箭头（Select 与 None 都是箭头）
+        crate::cursor::apply(Tool::None);
         // 收纳完把键盘焦点还给光标底下那个程序（我们不该占着前台）
         canvas::release_focus();
     }
