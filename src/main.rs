@@ -24,6 +24,7 @@ mod textedit;
 mod cursor;
 mod about;
 mod ghlogo;
+mod pencil;
 
 use shape::*;
 use toolbar::Toolbar;
