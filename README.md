@@ -40,7 +40,7 @@
 ## 功能一览
 
 工具条分上下两行：**上行是 13 个绘制工具**，**下行是颜色、粗细调节与常用操作**。
-![工具条展开态](https://1812974250.cdn.123clouddisk.com/1812974250/ymjew503t0l000dlnm5t0d0131k9so84DIYPDqr0AdiyDcxwBIQv.png)
+![工具条展开态](https://screenmarker-assets.pages.dev/toolbar.png)
 <table>
 <thead>
 <tr><th width="110">工具</th><th>说明</th></tr>
