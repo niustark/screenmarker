@@ -23,7 +23,7 @@ use windows::core::*;
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetCapture, GetKeyState, ReleaseCapture, SetCapture, VK_SHIFT,
+    GetCapture, GetKeyState, ReleaseCapture, SetCapture, VK_CONTROL, VK_SHIFT,
 };
 use windows::Win32::UI::WindowsAndMessaging::*;
 
@@ -109,8 +109,8 @@ static mut MZ_P0: Option<Point> = None;
 static mut MZ_RECT0: Option<Rect> = None;
 /// 马赛克框最小尺寸
 const MZ_MIN: f32 = 24.0;
-/// 马赛克框默认尺寸
-const MZ_DEFAULT: (f32, f32) = (160.0, 90.0);
+/// 马赛克框默认尺寸（宽度按需求翻倍，高度不变）
+const MZ_DEFAULT: (f32, f32) = (320.0, 90.0);
 
 /// 聚光灯：单击就给的默认半径（像素）
 const SPOT_DEFAULT: f32 = 150.0;
@@ -155,6 +155,60 @@ fn hwnd_of() -> HWND {
     unsafe { HWND(CANVAS_HWND as *mut _) }
 }
 
+/// 把「我们不需要」的滚轮消息转交给画布下面的窗口。
+///
+/// 画布是覆盖全屏的 layered 窗口，光标落在画布上时 Windows 会把 WM_MOUSEWHEEL
+/// 先投给我们（WindowFromPoint 命中的就是画布）。窗口过程不处理、
+/// DefWindowProcW 也不会往下转，结果下层的浏览器 / 网页一动不动 ——
+/// 实测前台窗口收到 0 次滚轮。水印工具下的普通滚轮我们明确不消费，
+/// 必须显式转交，浏览器才能正常上下滚动。
+unsafe fn forward_wheel(hwnd: HWND, wparam: WPARAM, lparam: LPARAM) {
+    let mut pt = POINT::default();
+    let _ = GetCursorPos(&mut pt);
+
+    // 沿 Z 序从画布往下找：第一个「可见 + 覆盖光标 + 不属于本程序」的窗口
+    let mut cur = GetWindow(hwnd, GW_HWNDNEXT).unwrap_or(HWND(ptr::null_mut()));
+    let mut target = HWND(ptr::null_mut());
+    for _ in 0..64 {
+        if cur.is_invalid() {
+            break;
+        }
+        if IsWindowVisible(cur).as_bool() {
+            let mut r = RECT::default();
+            if GetWindowRect(cur, &mut r).is_ok()
+                && pt.x >= r.left
+                && pt.x < r.right
+                && pt.y >= r.top
+                && pt.y < r.bottom
+            {
+                let mut buf = [0u16; 128];
+                let n = GetClassNameW(cur, &mut buf);
+                let cls = String::from_utf16_lossy(&buf[..n.max(0) as usize]);
+                if !cls.is_empty()
+                    && !cls.starts_with("ScreenMarker")
+                    && cls != "Progman"
+                    && cls != "WorkerW"
+                {
+                    target = cur;
+                    break;
+                }
+            }
+        }
+        cur = GetWindow(cur, GW_HWNDNEXT).unwrap_or(HWND(ptr::null_mut()));
+    }
+    // 兜底：滚轮传统上发给焦点窗口，前台窗口几乎总是用户想滚的那个
+    if target.is_invalid() {
+        let fg = GetForegroundWindow();
+        if !fg.is_invalid() && fg != hwnd {
+            target = fg;
+        }
+    }
+    if !target.is_invalid() {
+        let _ = PostMessageW(target, WM_MOUSEWHEEL, wparam, lparam);
+        crate::dbg::logf!("滚轮转发给下层窗口 hwnd={:?}", target);
+    }
+}
+
 unsafe extern "system" fn canvas_wndproc(
     hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM,
 ) -> LRESULT {
@@ -180,7 +234,35 @@ unsafe extern "system" fn canvas_wndproc(
             LRESULT(0)
         }
         WM_ERASEBKGND => LRESULT(1),
+        WM_MOUSEWHEEL => {
+            // 水印工具的「直接滚轮」完全不消费：全局钩子那边连动作都不投递，
+            // 但系统仍会把这条消息投给全屏画布，必须显式转交给下层窗口，
+            // 否则浏览器 / 网页滚不动。Ctrl+滚轮缩放水印、其它工具的滚轮
+            // 都由全局钩子处理，不转发（避免一边调图元一边把页面也滚了）。
+            let is_watermark = !state_ptr.is_null()
+                && (*state_ptr)
+                    .try_borrow()
+                    .map(|st| st.tool == Tool::Watermark)
+                    .unwrap_or(false);
+            let ctrl = (GetKeyState(VK_CONTROL.0 as i32) as u16 & 0x8000) != 0;
+            if is_watermark && !ctrl {
+                forward_wheel(hwnd, wparam, lparam);
+            }
+            LRESULT(0)
+        }
         WM_NCHITTEST => {
+            // 水印工具激活且未在编辑文字：整窗强制穿透，鼠标落到下层程序
+            // （浏览器、输入框等），水印本身作为装饰层仍可见。编辑器入口是
+            // 工具栏的水印按钮（点一下弹框），缩放用 Ctrl+滚轮，都不依赖
+            // 画布接收鼠标。try_borrow 失败（正重绘）时退回到下方常规判定。
+            let wt = if state_ptr.is_null() {
+                Tool::None
+            } else {
+                (*state_ptr).try_borrow().map(|s| s.tool).unwrap_or(Tool::None)
+            };
+            if wt == Tool::Watermark && !crate::textedit::is_typing() {
+                return LRESULT(HTTRANSPARENT as isize);
+            }
             // 穿透态：空白区域（alpha=0 的像素）返回 HTTRANSPARENT，
             // 让鼠标事件落到画布下面的程序；画了内容的像素返回 HTCLIENT，
             // 仍能点选/拖动图元。非穿透态一律 HTCLIENT（正常绘图）。
@@ -199,7 +281,30 @@ unsafe extern "system" fn canvas_wndproc(
                 (*(FRAME_PTR as *const Frame)).alpha_at(pt.x, pt.y)
             };
             if alpha == 0 {
-                LRESULT(HTTRANSPARENT as isize)
+                // 空心图形（矩形 / 椭圆）只有边框有像素，内部是透明的。
+                // 退出标注后的穿透态下，点在内部本来会穿透到下层程序，
+                // 右键就永远删不掉它（用户反馈的「右键不能关闭图元」）。
+                // 这里补一道：只要落在任一可选图元的命中范围里，就交给画布，
+                // 让右键删除 / 左键点选照常工作；真正空白处仍照旧穿透。
+                let on_shape = {
+                    let sp = st_ptr();
+                    if sp.is_null() {
+                        false
+                    } else {
+                        (*sp)
+                            .try_borrow()
+                            .map(|st| {
+                                let p = Point::new(pt.x as f32, pt.y as f32);
+                                st.shapes.iter().any(|s| s.selectable() && s.hit(p, 2.0))
+                            })
+                            .unwrap_or(false)
+                    }
+                };
+                if on_shape {
+                    LRESULT(HTCLIENT as isize)
+                } else {
+                    LRESULT(HTTRANSPARENT as isize)
+                }
             } else {
                 LRESULT(HTCLIENT as isize)
             }
@@ -382,7 +487,7 @@ unsafe extern "system" fn canvas_wndproc(
                 }
                 Tool::Mosaic => {
                     // 已有激活的马赛克：拖边框 = 缩放，拖内部 = 整体移动。
-                    // 其它位置单击 = 新建一个 160×90 的框。
+                    // 其它位置单击 = 新建一个 320×90 的框。
                     let mut mask = 0u8;
                     let mut inside = false;
                     let mut r0 = None;
@@ -415,8 +520,20 @@ unsafe extern "system" fn canvas_wndproc(
                     }
                 }
                 _ => {
-                    let mut st = (*state_ptr).borrow_mut();
-                    begin_draw(&mut st, p);
+                    // 生成即选中：按在刚画好图元的手柄上 = 缩放、按在它身上 =
+                    // 移动，都不再新建图形；按在空白处才画下一个，新图形落定
+                    // 后由 end_draw 接管选中，于是可以连续画下去。
+                    let editing = {
+                        let mut st = (*state_ptr).borrow_mut();
+                        edit_selected_only(&mut *st, p)
+                    };
+                    if !editing {
+                        unsafe {
+                            SELECTED = None;
+                        }
+                        let mut st = (*state_ptr).borrow_mut();
+                        begin_draw(&mut st, p);
+                    }
                 }
             }
             raise_toolbar();
@@ -592,7 +709,12 @@ unsafe extern "system" fn canvas_wndproc(
                 Tool::Polyline => {}
                 _ => {
                     let mut st = (*state_ptr).borrow_mut();
-                    update_draw(&mut st, p);
+                    if unsafe { EDIT_MASK } != 0 {
+                        // 这次拖动是在编辑「刚生成并选中」的图元，不是画新图形
+                        edit_drag(&mut *st, p);
+                    } else {
+                        update_draw(&mut st, p);
+                    }
                     drop(st);
                     request_repaint(hwnd);
                 }
@@ -660,8 +782,19 @@ unsafe extern "system" fn canvas_wndproc(
                 }
                 Tool::Eraser => {}
                 _ => {
-                    let mut st = (*state_ptr).borrow_mut();
-                    end_draw(&mut st, p);
+                    if unsafe { EDIT_MASK } != 0 {
+                        // 编辑拖动收尾：edit_end 会告出「马赛克被拉过大小」需要重抓
+                        let refresh = {
+                            let mut st = (*state_ptr).borrow_mut();
+                            edit_end(&mut *st)
+                        };
+                        if let Some(i) = refresh {
+                            mosaic_refresh(i);
+                        }
+                    } else {
+                        let mut st = (*state_ptr).borrow_mut();
+                        end_draw(&mut st, p);
+                    }
                 }
             }
             DRAG_LAST = None;
@@ -773,18 +906,59 @@ unsafe extern "system" fn canvas_wndproc(
                 repaint(hwnd);
                 return LRESULT(0);
             }
+            // 2) 右键点在「已经画好的图元」上 = 只删除这一个图元。
+            //    必须优先于下面的「右键退出工具」：用户指哪删哪，删完仍停留在
+            //    当前工具，接着就能继续画；想退出工具就在空白处右键（不会命中，
+            //    自然走回原来的分支）。
+            //    两种情况不抢这次右键：
+            //      * 折线还在画 —— 上面已收尾并 return；
+            //      * 文字 / 水印输入框开着 —— 右键仍要用来「提交并关闭输入框」。
+            //    水印是整屏平铺的全局效果（selectable() = false），不会命中，
+            //    仍由下面 Tool::Watermark 的专门分支负责删除。
+            //    命中范围即 hit_shape() 认定的所有可选中图元：矩形 / 椭圆 / 箭头 /
+            //    波浪线 / 自由手绘 / 折线 / 文字 / 序号 / 马赛克 / 聚光灯 / 放大镜。
+            if !crate::textedit::is_typing() {
+                let p = point_of(lparam);
+                let hit = {
+                    let st = (*state_ptr).borrow();
+                    hit_shape(&st.shapes, p)
+                };
+                if let Some(i) = hit {
+                    // remove_shape 会同步修正 SELECTED / ACTIVE_MOSAIC / MZ_IDX /
+                    // EDIT_IDX 以及文字输入框持有的图元下标，不必在这里再补。
+                    let (removed, left) = {
+                        let mut st = (*state_ptr).borrow_mut();
+                        let ok = remove_shape(&mut *st, i);
+                        (ok, st.shapes.len())
+                    };
+                    if removed {
+                        crate::dbg::logf!(
+                            "右键删除图元 idx={} 点击=({:.0},{:.0}) 剩余={}",
+                            i,
+                            p.x,
+                            p.y,
+                            left
+                        );
+                        repaint(hwnd);
+                        return LRESULT(0);
+                    }
+                }
+            }
             let tool = (*state_ptr).borrow().tool;
-            // 文字 / 水印：输入框还开着时，右键 = 提交并关闭输入框、退出工具，
-            // 不要留着输入框、也不要再弹出一个新的。
-            // 水印额外：退出时把水印 shape 一起删掉（水印铺满全屏，右键即视为
-            // 「在水印区域上点右键」→ 退出并删除）。
+            // 文字 / 水印：输入框还开着时，右键 = 提交并关闭输入框。
+            // 文字工具提交后**仍留在文字工具**：刚写完的字保持选中（能拖动/缩放），
+            // 再点别处就能直接开下一个输入框接着写；以前在这里切到 Select，
+            // 用户点下一处会走「空白 = 退出标注」，表现就是工具用完就没了。
+            // 水印仍要退出工具，并把整屏水印 shape 一起删掉。
             if tool == Tool::Text || tool == Tool::Watermark {
                 if crate::textedit::is_typing() {
                     crate::textedit::commit_open();
                 }
                 {
                     let mut st = (*state_ptr).borrow_mut();
-                    st.tool = Tool::Select;
+                    if tool == Tool::Watermark {
+                        st.tool = Tool::Select;
+                    }
                     CURRENT_DRAWING = None;
                     DRAW_START = None;
                     if tool == Tool::Watermark {
@@ -798,7 +972,10 @@ unsafe extern "system" fn canvas_wndproc(
                         crate::dbg::log("右键退出水印 已删除水印");
                     }
                 }
-                SELECTED = last_selectable(state_ptr);
+                // 文字工具保留提交时选中的那个文字框，不要被重选覆盖
+                if tool == Tool::Watermark {
+                    SELECTED = last_selectable(state_ptr);
+                }
                 repaint(hwnd);
                 return LRESULT(0);
             }
@@ -982,15 +1159,25 @@ pub fn repaint(hwnd: HWND) {
             return;
         }
         let f = &*(FRAME_PTR as *const Frame);
+        let state_ptr = st_ptr();
+        // 水印工具下也用真透明背景：下层程序透出来可见，配合 WM_NCHITTEST
+        // 的全屏穿透，鼠标可以直接操作下层（浏览器、输入框等），水印文字
+        // 作为装饰层叠加。编辑入口是工具栏水印按钮，不依赖画布接收鼠标。
+        let watermark_layer = if state_ptr.is_null() {
+            false
+        } else {
+            (*state_ptr)
+                .try_borrow()
+                .map(|s| s.tool == Tool::Watermark)
+                .unwrap_or(false)
+        };
         // 穿透态：背景像素 alpha 清成 0（真透明），配合 WS_EX_TRANSPARENT 让
         // 空白区域点击穿透；正常绘图态：背景 alpha=1，接住所有鼠标事件。
-        if CLICK_THROUGH {
+        if CLICK_THROUGH || watermark_layer {
             f.clear_transparent();
         } else {
             f.clear();
         }
-
-        let state_ptr = st_ptr();
         if !state_ptr.is_null() {
             let st = (*state_ptr).borrow();
             for sh in &st.shapes {
@@ -999,14 +1186,20 @@ pub fn repaint(hwnd: HWND) {
             // 选中框
             if let Some(idx) = SELECTED {
                 if idx < st.shapes.len() {
-                    match &st.shapes[idx] {
-                        // 圆形图元只画圆周上的 4 个圆点，不套外接方框
-                        Shape::Spotlight { center, radius }
-                        | Shape::Magnifier { center, radius, .. } => {
-                            Renderer::new(f.dc())
-                                .selection_circle(center.x, center.y, *radius);
+                    // 马赛克工具下激活框本来就有一圈虚线抓手，别再叠一个同样的
+                    // 通用选中框（同一圈线描两遍会明显变粗）；切到别的工具后
+                    // 马赛克虚线框不画，由下面的通用选中框接管。
+                    let already_dashed = st.tool == Tool::Mosaic && ACTIVE_MOSAIC == idx;
+                    if !already_dashed {
+                        match &st.shapes[idx] {
+                            // 圆形图元只画圆周上的 4 个圆点，不套外接方框
+                            Shape::Spotlight { center, radius }
+                            | Shape::Magnifier { center, radius, .. } => {
+                                Renderer::new(f.dc())
+                                    .selection_circle(center.x, center.y, *radius);
+                            }
+                            other => Renderer::new(f.dc()).selection_box(other.bbox()),
                         }
-                        other => Renderer::new(f.dc()).selection_box(other.bbox()),
                     }
                 }
             }
@@ -1018,6 +1211,18 @@ pub fn repaint(hwnd: HWND) {
             {
                 if let Shape::Mosaic { rect, .. } = &st.shapes[ACTIVE_MOSAIC] {
                     Renderer::new(f.dc()).selection_box(*rect);
+                }
+            }
+            // 穿透态：per-pixel 分层窗口在 alpha=0 的像素上会让鼠标直接穿透，
+            // WM_NCHITTEST 连调用都不会有。空心图形（矩形 / 椭圆）内部就是 alpha=0，
+            // 点在内部右键 / 点选全都失效（用户反馈的「右键不能关闭图元」）。
+            // 把可选图元的外接矩形抬到 alpha=1（肉眼不可见），鼠标才会落回画布。
+            if CLICK_THROUGH {
+                for sh in &st.shapes {
+                    if sh.selectable() {
+                        let bb = sh.bbox();
+                        f.lift_alpha((bb.x, bb.y, bb.w, bb.h), 1);
+                    }
                 }
             }
         }
@@ -1296,14 +1501,29 @@ fn begin_draw(st: &mut AppState, p: Point) {
                 pixmap_h: 0,
             }),
             Tool::Number => {
-                st.number_counter += 1;
-                let num = st.number_counter;
+                // 编号由「屏幕上还存在的序号」推导，而不是单调递增的计数器：
+                // 点了 1、2、3 后右键删掉 3，下一次点仍然出 3，不会跳到 4。
+                // 清屏 / 撤销 / 删除任意序号后都会自动补回缺口之后的那个号。
+                let num = st
+                    .shapes
+                    .iter()
+                    .filter_map(|s| match s {
+                        Shape::Number { number, .. } => Some(*number),
+                        _ => None,
+                    })
+                    .max()
+                    .unwrap_or(0)
+                    + 1;
+                st.number_counter = num;
+                crate::dbg::logf!("序号生成 num={num} 现存序号数={}", st.shapes.iter().filter(|s| matches!(s, Shape::Number { .. })).count());
                 st.shapes.push(Shape::Number {
                     pos: p,
                     number: num,
                     color: st.color,
                     radius: number_radius(st.width),
                 });
+                // 序号是「点一下直接落定」，不走 end_draw，选中要在这里补。
+                SELECTED = Some(st.shapes.len() - 1);
                 None
             }
             Tool::Watermark => {
@@ -1449,6 +1669,10 @@ fn end_draw(st: &mut AppState, p: Point) {
             }
         }
         st.shapes.push(sh);
+        // 生成即选中：屏幕上当场出现选中框和 8 个手柄，接着就能拖着移动 /
+        // 拉手柄缩放，不必先右键退出工具再点一下图形。
+        // 太小的误触图形和抓屏失败的马赛克在上面的分支已经 return，不会走到这里。
+        SELECTED = Some(st.shapes.len() - 1);
     }
 }
 
@@ -1477,6 +1701,40 @@ fn last_selectable(state_ptr: *const RefCell<AppState>) -> Option<usize> {
     }
     let st = unsafe { (*state_ptr).borrow() };
     st.shapes.iter().rposition(|s| s.selectable())
+}
+
+/// 绘制工具下的「刚生成图元」优先编辑。
+///
+/// 与 `edit_begin` 的区别：只认**当前选中的那一个**，不做全量命中重选。
+/// 否则只要屏幕上有一个图形，用户就再也没法在它附近画新图形了 —— 每次
+/// 按下都会被当成「选中并移动旧图元」。这里的手柄/内部命中仅服务于
+/// 「生成即选中」这个临时编辑态；按在空白处会清掉选中并正常开始新图形。
+///
+/// 返回 true 表示这次按下进入了一次移动/缩放拖动，调用方不要再 begin_draw。
+fn edit_selected_only(st: &mut AppState, p: Point) -> bool {
+    let Some(idx) = (unsafe { SELECTED }) else {
+        return false;
+    };
+    if idx >= st.shapes.len() || !st.shapes[idx].selectable() {
+        return false;
+    }
+    let bb = st.shapes[idx].bbox();
+    // 手柄优先（可能压在别的图元上），其后才是「落在图元内 = 整体移动」
+    let mut mask = match &st.shapes[idx] {
+        Shape::Spotlight { center, radius }
+        | Shape::Magnifier { center, radius, .. } => {
+            crate::render::circle_handle_hit(center.x, center.y, *radius, p, 10.0)
+        }
+        _ => crate::render::handle_hit(bb, p, 8.0),
+    };
+    if mask == 0 && bb.contains(p, 0.0) {
+        mask = EDIT_MOVE;
+    }
+    if mask == 0 {
+        return false;
+    }
+    begin_edit_drag(st, idx, mask, p, bb);
+    true
 }
 
 /// 按下：判断这次是「缩放某个图元」「移动某个图元」还是「重新选中」。
@@ -1719,6 +1977,29 @@ pub fn delete_selected() -> bool {
     removed
 }
 
+/// 双击右侧 Ctrl：一键清屏。
+///
+/// 只清「已画出来的图元」和所有临时状态，不改工具 / 不改工具条展开态 /
+/// 不隐藏画布 —— 清完可以立刻接着标注。和工具条上的「清屏」按钮是同一件事，
+/// 区别是这里由全局键盘钩子触发，光标在别的程序里也能用。
+pub fn clear_all() {
+    // 输入框还开着就先关掉：水印按「取消」丢弃未确认内容，普通文字先提交，
+    // 否则它持有的旧下标会指向已经清掉的图元。
+    crate::textedit::cancel_watermark_open();
+    crate::textedit::commit_open();
+    let sp = st_ptr();
+    if !sp.is_null() {
+        let mut st = unsafe { (*sp).borrow_mut() };
+        st.shapes.clear();
+        // 编号由现存序号推导，这里顺手把旧计数器归零，语义保持一致
+        st.number_counter = 0;
+    }
+    reset_shape_indices();
+    reset_transient();
+    repaint_global();
+    crate::dbg::log("双击右Ctrl 快速清屏");
+}
+
 /// 「软退出」：退出当前功能、工具条收进主图标、焦点还给下面窗口，
 /// 但**画布和已经画好的图案必须继续显示**。
 ///
@@ -1761,6 +2042,24 @@ pub fn keep_canvas_exit() {
     crate::toolbar::collapse_to_icon();
     if !was_expanded {
         release_focus();
+    }
+    // collapse_to_icon → toggle_expanded 的「收起」分支会调 release_focus()：
+    // 它先 hide 画布、把前台交还下层程序，再 show 回来。这一 hide/show 会让
+    // 画布的 Z 序掉到浏览器等非 TOPMOST 窗口后面 —— 现象就是图案明明还显示着，
+    // 点它 / 右键它却全都没反应（WindowFromPoint 直接命中下面的程序）。
+    // 收完工具条后把画布重新顶回 TOPMOST 带，保证它仍盖在下层之上。
+    if !h.is_invalid() {
+        unsafe {
+            SetWindowPos(
+                h,
+                HWND_TOPMOST,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
+            );
+        }
     }
     repaint_global();
 }
@@ -2103,27 +2402,54 @@ pub fn zoom_selected(up: bool) -> bool {
 /// 不再去调线宽；返回 false 则由调用方走「调线宽/字号」。
 ///
 /// 分工：
-///   放大镜        —— 滚轮 = 取景范围，Ctrl+滚轮 = 放大倍率
-///   聚光灯        —— 滚轮 = 半径
-///   马赛克        —— 滚轮 = 区域大小（重抓打码）
-///   序号          —— 滚轮 = 字号/圈的大小（走线宽，再由 sync_number 派生）
-///   选择态        —— 看选中的是什么：圆形图元套用上面同一套，
-///                   普通图形（矩形/圆/箭头/折线/波浪/手绘/文字）等比缩放
+///   水印工具   —— 直接滚轮完全放行给下层程序（浏览器/网页照常上下滚动），
+///                 Ctrl+滚轮才缩放已生成的水印
+///   有选中图元 —— 滚轮一律缩放「选中的这一个」，**与当前工具无关**。
+///                 「生成即选中」后工具往往还是矩形/画笔，以前只有 Select
+///                 才缩放，于是画完直接滚滚轮仍只是在调线宽。
+///   没选中     —— 按工具原有语义；普通绘制工具回落到调线宽/字号
 pub fn handle_wheel(up: bool, ctrl: bool) -> bool {
     let sp = st_ptr();
     if sp.is_null() {
         return false;
     }
     let tool = unsafe { (*sp).borrow().tool };
-    let kind = match tool {
-        Tool::Magnifier => 1,
-        Tool::Spotlight => 2,
-        Tool::Mosaic => 4,
-        Tool::Select => selected_kind(),
-        _ => 0,
-    };
-    match kind {
-        1 => {
+
+    // 水印：直接滚轮什么都不做。返回 true 是为了拦住 dispatch 里的
+    // adjust_width()，否则每滚一格都会改线宽、整屏重绘，穿透态还会蜂鸣。
+    // 滚轮消息本身从不吞（mouse_proc 一律 CallNextHookEx），下层程序照收。
+    if tool == Tool::Watermark {
+        if ctrl {
+            zoom_watermark(up);
+        }
+        return true;
+    }
+
+    // 选中态优先：矩形/椭圆/箭头/波浪/手绘/折线/文字等比缩放；
+    // 圆形与马赛克走各自的专有缩放（本质同样是在改这个图元的大小）。
+    if has_selection() {
+        return match selected_kind() {
+            1 => {
+                if ctrl {
+                    zoom_magnifier(up);
+                } else {
+                    resize_magnifier(up);
+                }
+                true
+            }
+            2 => {
+                zoom_spotlight(up);
+                true
+            }
+            3 => resize_number(up),
+            4 => resize_mosaic(up),
+            _ => zoom_selected(up),
+        };
+    }
+
+    // 没有选中：保留各工具原有的滚轮语义
+    match tool {
+        Tool::Magnifier => {
             if ctrl {
                 zoom_magnifier(up);
             } else {
@@ -2131,22 +2457,42 @@ pub fn handle_wheel(up: bool, ctrl: bool) -> bool {
             }
             true
         }
-        2 => {
+        Tool::Spotlight => {
             zoom_spotlight(up);
             true
         }
-        3 => resize_number(up),
-        4 => resize_mosaic(up),
-        // 选择态下选中的普通几何图形 → 等比缩放
-        0 => {
-            if tool == Tool::Select {
-                zoom_selected(up)
-            } else {
-                false
-            }
-        }
+        Tool::Mosaic => resize_mosaic(up),
         _ => false,
     }
+}
+
+/// Ctrl + 滚轮缩放已生成的水印（仅水印工具下生效）。
+///
+/// 改的是「线宽滑块」这个唯一基准再同步到水印 shape：之后改颜色 / 拖滑块
+/// 时 sync_watermark() 会把同一个字号派生出来，不会把缩放结果刷回去。
+pub fn zoom_watermark(up: bool) -> bool {
+    let sp = st_ptr();
+    if sp.is_null() {
+        return false;
+    }
+    let k = if up { 1.10 } else { 1.0 / 1.10 };
+    let (size, n) = {
+        let mut st = unsafe { (*sp).borrow_mut() };
+        st.width = (st.width * k).clamp(1.0, 40.0);
+        let size = watermark_size(st.width);
+        let mut n = 0;
+        for sh in st.shapes.iter_mut() {
+            if let Shape::Watermark { size: sz, .. } = sh {
+                *sz = size;
+                n += 1;
+            }
+        }
+        (size, n)
+    };
+    crate::dbg::logf!("水印 Ctrl+滚轮缩放 个数={n} size={size:.1}");
+    repaint_global();
+    crate::toolbar::refresh();
+    true
 }
 
 /// 让已画的文字跟随「当前粗细滑块」的字号。
@@ -2335,7 +2681,7 @@ fn mosaic_handle(r: Rect, p: Point, tol: f32) -> u8 {
     m
 }
 
-/// 新建马赛克框：点一下就给一个 160×90 的虚线框，并立刻抓取该区域打码
+/// 新建马赛克框：点一下就给一个 320×90 的虚线框，并立刻抓取该区域打码
 fn mosaic_create(st: &mut AppState, p: Point) -> usize {
     unsafe {
         let sw = GetSystemMetrics(SM_CXSCREEN) as f32;
@@ -2352,6 +2698,9 @@ fn mosaic_create(st: &mut AppState, p: Point) -> usize {
         });
         let idx = st.shapes.len() - 1;
         ACTIVE_MOSAIC = idx;
+        // 马赛克也是「点一下直接落定」：除了自己的抓手索引，同时进通用选中态，
+        // 这样切到别的工具后仍能选中、拖动、拉手柄缩放它。
+        SELECTED = Some(idx);
         idx
     }
 }
@@ -2387,18 +2736,24 @@ fn mosaic_refresh(idx: usize) {
     show_canvas(h);
     if let Some((data, cw, ch)) = cap {
         let px = pixelate(&data, cw, ch, block);
-        let mut st = unsafe { (*sp).borrow_mut() };
-        if let Some(Shape::Mosaic {
-            pixmap,
-            pixmap_w,
-            pixmap_h,
-            ..
-        }) = st.shapes.get_mut(idx)
         {
-            *pixmap = Some(px);
-            *pixmap_w = cw;
-            *pixmap_h = ch;
+            let mut st = unsafe { (*sp).borrow_mut() };
+            if let Some(Shape::Mosaic {
+                pixmap,
+                pixmap_w,
+                pixmap_h,
+                ..
+            }) = st.shapes.get_mut(idx)
+            {
+                *pixmap = Some(px);
+                *pixmap_w = cw;
+                *pixmap_h = ch;
+            }
         }
+        // show_canvas() 里那次重绘发生在 pixmap 写回之前，画出来的仍是
+        // 「只有虚线框、没有马赛克」的旧状态。补一次重绘，新建/缩放后
+        // 当场就能看到打码效果，不必等鼠标再动一下才刷新。
+        repaint_global();
     }
 }
 
@@ -2436,13 +2791,24 @@ pub fn apply_watermark() {
     }
     {
         let mut st = unsafe { (*sp).borrow_mut() };
-        let text = st.watermark_text.clone();
+        let text = st.watermark_text.trim().to_string();
         let color = st.color;
         let size = watermark_size(st.width);
         let exist = st
             .shapes
             .iter()
             .rposition(|s| matches!(s, Shape::Watermark { .. }));
+        // 文字清空 = 移除水印（顺手保留的备用路径：输入框里删光文字回车）。
+        // 主要退出通道是「再点一次水印按钮 / 按 Esc」，见 close_watermark()。
+        if text.is_empty() {
+            if let Some(i) = exist {
+                remove_shape(&mut *st, i);
+            }
+            crate::dbg::log("水印文字为空，移除水印");
+            drop(st);
+            repaint_global();
+            return;
+        }
         match exist {
             Some(i) => {
                 if let Shape::Watermark {
@@ -2472,20 +2838,9 @@ pub fn apply_watermark() {
 ///   * 输入框已经开着 → 也不重复弹，避免叠出第二个框。
 pub fn edit_watermark() {
     unsafe {
-        let sp = st_ptr();
-        if !sp.is_null() {
-            let has = (*sp)
-                .borrow()
-                .shapes
-                .iter()
-                .any(|s| matches!(s, Shape::Watermark { .. }));
-            if has {
-                crate::dbg::log("已有水印，跳过输入框");
-                sync_watermark();
-                repaint_global();
-                return;
-            }
-        }
+        // 已有水印也不再跳过：再点水印按钮就重新弹框（预填当前文字），
+        // 回车后 apply_watermark 直接更新那一份。之前「有了就静默跳过」，
+        // 用户会以为水印弹不出来。除非输入框已经开着，那就不重复弹。
         if textedit::is_typing() {
             crate::dbg::log("已有输入框，跳过水印输入框");
             return;
@@ -2506,6 +2861,54 @@ pub fn edit_watermark() {
         };
         textedit::open_watermark(hinstance, &cur, state_rc);
     }
+}
+
+/// 水印是不是正开着（工具停在水印上）。
+pub fn watermark_on() -> bool {
+    let sp = st_ptr();
+    if sp.is_null() {
+        return false;
+    }
+    unsafe { (*sp).borrow().tool == Tool::Watermark }
+}
+
+/// 一键关掉水印：删掉那一份水印、工具回到「选择」，画布和别的图形原样留着。
+///
+/// 为什么要单独一条通道：水印工具下画布整窗穿透（这样鼠标能直接操作下层
+/// 程序，能点浏览器输入框），右键根本收不到；以前想退出只能「点水印按钮 →
+/// 把文字清空 → 回车」，绕且容易以为程序卡住了。现在是开关语义：
+///   * 再点一次水印按钮 → 走这里，水印立刻消失、按钮熄灭；
+///   * 按 Esc → 也走这里（比 exit_markup 整层隐藏画布轻得多）。
+/// 关掉后 watermark_text 仍保留，下次点开输入框会带上次的文字，方便改。
+pub fn close_watermark() {
+    let sp = st_ptr();
+    if sp.is_null() {
+        return;
+    }
+    // 输入框还开着就先取消：否则它随后回车会把刚删掉的水印又铺回来。
+    crate::textedit::cancel_watermark_open();
+    let removed = {
+        let mut st = unsafe { (*sp).borrow_mut() };
+        let idx = st
+            .shapes
+            .iter()
+            .rposition(|s| matches!(s, Shape::Watermark { .. }));
+        let ok = match idx {
+            Some(i) => remove_shape(&mut *st, i),
+            None => false,
+        };
+        st.tool = Tool::Select;
+        ok
+    };
+    // 回到普通标注态：画布重新接住鼠标（选择工具下不再整窗穿透）
+    unsafe {
+        CLICK_THROUGH = false;
+    }
+    crate::cursor::apply(Tool::Select);
+    // 工具条高亮是从 state.tool 读的，改完必须重绘
+    crate::toolbar::refresh();
+    repaint_global();
+    crate::dbg::logf!("一键关闭水印 removed={removed}");
 }
 
 /// 画布窗口（句柄随进程存活，不做显式销毁）

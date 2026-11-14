@@ -157,6 +157,35 @@ impl Frame {
         }
     }
 
+    /// 把区域内「全透明」的像素抬到最低 alpha（RGB 保持不变）。
+    ///
+    /// 用于穿透态：per-pixel 分层窗口在 alpha=0 的像素上会让鼠标直接穿透，
+    /// 连 WM_NCHITTEST 都不会被调用。空心图形（矩形 / 椭圆）只有边框有像素、
+    /// 内部是 alpha=0，于是「点在内部右键 / 点选」全都失效。把外接矩形抬到
+    /// alpha=1（肉眼不可见）后，鼠标才会落回画布，右键删除 / 拖动手柄才生效。
+    pub fn lift_alpha(&self, area: (f32, f32, f32, f32), min: u8) {
+        let x0 = area.0.floor().max(0.0) as i32;
+        let y0 = area.1.floor().max(0.0) as i32;
+        let x1 = (area.0 + area.2).ceil().min(self.w as f32) as i32;
+        let y1 = (area.1 + area.3).ceil().min(self.h as f32) as i32;
+        if x1 <= x0 || y1 <= y0 {
+            return;
+        }
+        let min_a = (min as u32) << 24;
+        let w = self.w as usize;
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let idx = y as usize * w + x as usize;
+                unsafe {
+                    let px = &mut *self.bits.add(idx);
+                    if (*px >> 24) < min as u32 {
+                        *px = (*px & 0x00FF_FFFF) | min_a;
+                    }
+                }
+            }
+        }
+    }
+
     /// 把区域内「占位色」像素还原成：真色 + 指定 alpha。
     ///
     /// 不能只做「等于占位色」的精确相等判断 —— 文字的抗锯齿边缘是占位色与背景的

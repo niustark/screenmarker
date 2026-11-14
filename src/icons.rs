@@ -12,7 +12,10 @@ use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::*;
 
 pub const NORMAL: (u8, u8, u8) = (0x5B, 0x64, 0x70);
+/// 未选中但悬停：深灰图标转成品牌红（边框也同时变红）
 pub const ACTIVE: (u8, u8, u8) = (0xFF, 0x4D, 0x4F);
+/// 选中态是实心红底，图标必须反白才看得见
+pub const ACTIVE_ON: (u8, u8, u8) = (0xFF, 0xFF, 0xFF);
 
 fn cref(rgb: (u8, u8, u8)) -> COLORREF {
     COLORREF(((rgb.2 as u32) << 16) | ((rgb.1 as u32) << 8) | rgb.0 as u32)
@@ -317,7 +320,13 @@ pub fn draw_tool_icon(hdc: HDC, r: RECT, tool: Tool, color: (u8, u8, u8)) {
             // 打码：外框 + 2×2 棋盘格（深浅交替）。
             // 原来的 3×3 全填色缩到 30px 像九宫格键盘，看不出「马赛克」的意思。
             g.rect(3.4, 3.4, 17.2, 17.2, 1.8, col);
-            let dim = cref((175, 183, 193));
+            // 选中态是红底 + 白图标：棋盘格的「暗格」不能用原来的浅灰，
+            // 否则红底上会糊成一块，这里换成半透明的浅红（用实色近似）。
+            let dim = if color == ACTIVE_ON {
+                cref((0xFF, 0xB8, 0xB9))
+            } else {
+                cref((175, 183, 193))
+            };
             let cell = 7.0;
             for (i, x) in [5.0f32, 12.0].iter().enumerate() {
                 for (j, y) in [5.0f32, 12.0].iter().enumerate() {

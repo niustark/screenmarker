@@ -1,6 +1,6 @@
 [package]
 name = "screenmarker"
-version = "0.1.5"
+version = "0.1.6"
 edition = "2021"
 
 # 构建脚本与图标资源统一放在 res/（路径均相对包根）

@@ -43,6 +43,14 @@ static mut DEL_LAST: u32 = 0;
 // Del/Backspace 就原样留给 PPT / 浏览器，不会误删残留的选中图元。
 static mut DEL_OWNED_BY_US: bool = false;
 
+// 双击右侧 Ctrl 的判定状态。
+// RCTRL_LAST   —— 上一次「单独按下右 Ctrl」的时间戳（0 = 没有待配对的一击）
+// RCTRL_TOGGLED—— 那一击是否真的切换过工具条；穿透态下单击不切换，
+//                 双击时就不能盲目回滚，否则会凭空把工具条状态改一次。
+const RCTRL_DBL_MS: u32 = 360;
+static mut RCTRL_LAST: u32 = 0;
+static mut RCTRL_TOGGLED: bool = false;
+
 /// 由画布 / 工具条的窗口过程在收到鼠标按下（或右键抬起）时调用。
 pub fn note_our_window_clicked() {
     unsafe { DEL_OWNED_BY_US = true; }
@@ -59,6 +67,8 @@ pub const HOOK_TOGGLE: usize = 1;
 pub const HOOK_ESC: usize = 2;
 pub const HOOK_DELETE: usize = 3;
 pub const HOOK_WHEEL: usize = 4;
+/// 双击右侧 Ctrl → 快速清屏
+pub const HOOK_CLEAR: usize = 5;
 
 #[inline]
 unsafe fn post_action(hwnd: HWND, action: usize, param: isize) {
@@ -72,8 +82,17 @@ pub fn dispatch(action: usize, param: isize) {
     match action {
         HOOK_TOGGLE => crate::toolbar::toggle_collapse(),
         HOOK_ESC => unsafe {
-            // 问前台控件 WM_GETDLGCODE 最多 50ms，放在窗口过程里不会拖住钩子。
-            if !keyboard_owned_by_edit() {
+            // 水印开着、且我们自己的输入框已经关掉 → Esc = 一键关水印。
+            //
+            // 这里刻意**不要求**「前台不在打字」：水印工具下画布整窗穿透，
+            // 用户本来就是在前台程序（浏览器网页、输入框）里操作，
+            // keyboard_owned_by_edit() 几乎总被判成 true，按原规则 Esc
+            // 永远关不掉水印。误关的代价很小 —— 水印肉眼可见地消失，
+            // 再点一下水印按钮就回来了；关不掉才是真麻烦。
+            let wm = crate::canvas::watermark_on();
+            if wm && !crate::textedit::is_typing() {
+                crate::canvas::close_watermark();
+            } else if !keyboard_owned_by_edit() {
                 crate::canvas::exit_markup();
             }
         },
@@ -89,6 +108,14 @@ pub fn dispatch(action: usize, param: isize) {
             if !canvas::handle_wheel(up, ctrl) {
                 crate::toolbar::adjust_width(if up { 1.0 } else { -1.0 });
             }
+        }
+        HOOK_CLEAR => {
+            // 双击的第一下已经切换过工具条（param=1）时再切一次回滚，
+            // 让「双击清屏」不附带改变展开/收纳状态。
+            if param != 0 {
+                crate::toolbar::toggle_collapse();
+            }
+            crate::canvas::clear_all();
         }
         _ => {}
     }
@@ -256,29 +283,46 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
             }
         }
 
-        // 右侧 Ctrl：收纳 / 展开工具条（替代原来的空格）
-        // 与空格不同，右侧 Ctrl 是修饰键，本身不会往输入框里输入字符，
+        // 右侧 Ctrl：单击 = 收纳 / 展开工具条；双击 = 快速清屏。
+        // 与空格不同，右 Ctrl 是修饰键，本身不会往输入框里输入字符，
         // 所以不需要 keyboard_owned_by_edit() 让路；但要防止它作为 Ctrl+C/V
-        // 等组合键的一部分时误触发 —— 只有「单独按下右侧 Ctrl」才算数。
+        // 等组合键的一部分误触发 —— 只有「单独按下」才算数。
         if is_down && kb.vkCode == VK_RCTRL && !state_ptr.is_null() {
-            // 组合键判定：除了右侧 Ctrl 自身，其他修饰键（Shift/Alt/左Ctrl/Win）
-            // 或任何主键区按键正在按下时，都视为组合键，不触发工具条。
-            let alone = !crate::canvas::is_click_through()
-                && (GetAsyncKeyState(VK_SHIFT.0 as i32) as u16 & 0x8000) == 0
+            // 组合键判定：其它修饰键（Shift/Alt/左Ctrl/Win）按下就不算。
+            // 穿透态只限制「单击切换工具条」，不限制双击清屏 ——
+            // 画完收起工具条后画面上还留着图案，也应该能一键清掉。
+            let no_mods = (GetAsyncKeyState(VK_SHIFT.0 as i32) as u16 & 0x8000) == 0
                 && (GetAsyncKeyState(VK_MENU.0 as i32) as u16 & 0x8000) == 0
                 && (GetAsyncKeyState(VK_LCONTROL.0 as i32) as u16 & 0x8000) == 0
                 && (GetAsyncKeyState(VK_LWIN.0 as i32) as u16 & 0x8000) == 0
                 && (GetAsyncKeyState(VK_RWIN.0 as i32) as u16 & 0x8000) == 0;
-            if alone {
-                let fresh = is_fresh(SPACE_LATCH, SPACE_LAST, kb.time);
-                SPACE_LAST = kb.time;
-                if fresh {
-                    SPACE_LATCH = true;
-                    post_action(canvas_hwnd, HOOK_TOGGLE, 0);
-                }
-            } else {
+            let fresh = is_fresh(SPACE_LATCH, SPACE_LAST, kb.time);
+            SPACE_LAST = kb.time;
+            if !no_mods {
                 // 组合键中的右侧 Ctrl 不属于我们：不碰工具条，也不更新闩锁。
                 SPACE_LATCH = false;
+                RCTRL_LAST = 0;
+                RCTRL_TOGGLED = false;
+            } else if fresh {
+                SPACE_LATCH = true;
+                let has_prev = RCTRL_LAST != 0;
+                let dbl = has_prev && kb.time.wrapping_sub(RCTRL_LAST) <= RCTRL_DBL_MS;
+                if dbl {
+                    RCTRL_LAST = 0;
+                    let toggled = RCTRL_TOGGLED;
+                    RCTRL_TOGGLED = false;
+                    // 真正的清屏（整屏重绘）投给窗口过程异步执行。
+                    post_action(canvas_hwnd, HOOK_CLEAR, toggled as isize);
+                } else {
+                    // 单击立即切换，不给它加双击等待延迟（高频操作，延迟会明显发钝）。
+                    // 代价是双击的第一下已经切过一次工具条，清屏时按 param 回滚。
+                    let can_toggle = !crate::canvas::is_click_through();
+                    if can_toggle {
+                        post_action(canvas_hwnd, HOOK_TOGGLE, 0);
+                    }
+                    RCTRL_LAST = kb.time;
+                    RCTRL_TOGGLED = can_toggle;
+                }
             }
         }
 
@@ -362,14 +406,16 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
                 let visible = !canvas_hwnd.is_invalid()
                     && IsWindowVisible(canvas_hwnd).as_bool();
                 let handle = expanded && !through && active && visible;
-                if handle {
-                    // 滚轮分工（在 dispatch 里执行）：
-                    //   放大镜/聚光灯  → 调取景范围（半径）
-                    //   放大镜 + Ctrl  → 调放大倍率
-                    //   马赛克         → 调区域大小（重新抓屏打码）
-                    //   选择态         → 看选中的是什么，套用上面同一套
-                    //   其它工具       → 调线宽/字号（序号的大小也由线宽派生）
-                    let ctrl = (GetKeyState(VK_CONTROL.0 as i32) as u16 & 0x8000) != 0;
+                // 滚轮分工（在 dispatch 里执行）：
+                //   水印 + 直接滚轮 → 完全放行：连动作消息都不投递，
+                //     浏览器/网页照常上下滚动，也不会整屏重绘、不会蜂鸣
+                //   水印 + Ctrl     → 缩放已生成的水印
+                //   有选中图元     → 缩放选中的那一个（与当前工具无关）
+                //   其它           → 各工具专有语义 / 调线宽
+                let ctrl = (GetKeyState(VK_CONTROL.0 as i32) as u16 & 0x8000) != 0;
+                let watermark_passthrough =
+                    tool == crate::shape::Tool::Watermark && !ctrl;
+                if handle && !watermark_passthrough {
                     let up = delta > 0;
                     let param = (up as isize) | ((ctrl as isize) << 1);
                     post_action(canvas_hwnd, HOOK_WHEEL, param);

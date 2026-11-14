@@ -51,9 +51,13 @@ static mut SS_OLD: isize = 0;
 static mut SS_W: i32 = 0;
 static mut SS_H: i32 = 0;
 // 渲染内容签名：尺寸或「状态」变化时才会重画 paint_content，否则直接复用
-// 已缓存的 4x 位图（鼠标在工具条上移动不改变 tool/color/width，不应触发重画）。
-// 元组 = (展开?, tool 判别, 颜色, 线宽*100, 逻辑宽, 逻辑高)
-static mut TB_SIG: (u8, u8, u32, i32, i32, i32) = (0, 0, 0, 0, 0, 0);
+// 已缓存的 4x 位图（鼠标停留在同一个按钮上时不重复光栅化）。
+// 元组 = (展开?, tool 判别, 颜色, 线宽*100, 逻辑宽, 逻辑高, 悬停项索引)
+static mut TB_SIG: (u8, u8, u32, i32, i32, i32, i32) = (0, 0, 0, 0, 0, 0, -1);
+
+/// 当前鼠标悬停的按钮在 layout() 里的下标（-1 = 没有）。
+/// 官网演示页里悬停会让按钮变红边 + 红图标，这里保持同样的反馈。
+static mut HOVER_IDX: i32 = -1;
 
 /// Tool 枚举没有 repr(u8)，转一个稳定判别值用于渲染签名
 fn tool_id(t: Tool) -> u8 {
@@ -113,6 +117,9 @@ const TIP_TEXT: &str = "点击或按右侧 Ctrl 键展开工具条";
 /// 这里必须自定义；漏了的话 match 模式会退化为变量绑定（匹配一切），
 /// 把 WM_NCCREATE 也吞掉返回 0，导致工具条窗口创建失败（句柄无效）。
 const WM_MOUSELEAVE: u32 = 0x02A3;
+/// 鼠标移到工具条「非按钮区」时收到的是 WM_NCMOUSEMOVE（0x00A0，
+/// 因为 WM_NCHITTEST 把空隙判成了标题栏），此时要撤掉悬停高亮。
+const WM_NCMOUSEMOVE_: u32 = 0x00A0;
 
 const TOOLS: &[(Tool, &str)] = &[
     (Tool::Pen, "画笔"),
@@ -172,6 +179,21 @@ static mut WIN_P0: (i32, i32) = (0, 0);
 /// COLORREF 是 0x00BBGGRR，用这个辅助函数按 RGB 顺序写更不容易出错
 fn c(r: u8, g: u8, b: u8) -> COLORREF {
     COLORREF(((b as u32) << 16) | ((g as u32) << 8) | r as u32)
+}
+
+// 官网演示页（screenmarker.9niu.top）工具条 replica 的配色。
+// 面板是极浅的竖向渐变，选中/悬停用同一个品牌红 #ff4d4f。
+const PANEL_TOP: (u8, u8, u8) = (0xFB, 0xFC, 0xFE);
+const PANEL_BOTTOM: (u8, u8, u8) = (0xEE, 0xF1, 0xF6);
+const PANEL_LINE: (u8, u8, u8) = (0xE7, 0xEB, 0xF1);
+const ACCENT: (u8, u8, u8) = (0xFF, 0x4D, 0x4F);
+
+fn accent() -> COLORREF {
+    c(ACCENT.0, ACCENT.1, ACCENT.2)
+}
+
+fn lerp_u8(a: u8, b: u8, t: f32) -> u8 {
+    ((a as f32 + (b as f32 - a as f32) * t).round()).clamp(0.0, 255.0) as u8
 }
 
 fn rect(x: i32, y: i32, w: i32, h: i32) -> RECT {
@@ -353,19 +375,53 @@ unsafe fn round_tile(
     DeleteObject(HGDIOBJ(brush.0));
 }
 
-/// 按钮瓷砖：普通态白底 + 浅灰描边；选中态白底 + 蓝色描边（PixPin 同款）。
-/// 白底瓷砖在任何背景（包括纯白桌面）上都有清晰的轮廓。
-unsafe fn button_bg(hdc: HDC, r: RECT, active: bool, s_: f32) {
-    if active {
-        round_tile(
-            hdc,
-            r,
-            c(0xF2, 0xF7, 0xFF),
-            c(0x0A, 0x84, 0xFF),
-            2.0,
-            8.0,
-            s_,
+/// 只描一圈圆角边框、不填充内部（面板用了渐变，不能再被实心圆角矩形盖掉）。
+unsafe fn round_outline(hdc: HDC, r: RECT, border: COLORREF, border_w: f32, radius: f32, s: f32) {
+    let pen = CreatePen(PS_SOLID, ((border_w * s) as i32).max(1), border);
+    let op = SelectObject(hdc, HGDIOBJ(pen.0));
+    // NULL_BRUSH 让 RoundRect 只画笔、不填色
+    let ob = SelectObject(hdc, GetStockObject(NULL_BRUSH));
+    let rad = ((radius * s) as i32).max(2);
+    RoundRect(hdc, r.left, r.top, r.right + 1, r.bottom + 1, rad, rad);
+    SelectObject(hdc, ob);
+    SelectObject(hdc, op);
+    DeleteObject(HGDIOBJ(pen.0));
+}
+
+/// 面板背景：官网同款 #fbfcfe → #eef1f6 竖向渐变。
+/// GDI 没有跨设备的渐变画笔，用若干条纯色横带拼接；因为是画在 4x 超采样
+/// 位图上再缩回来的，色带边界会被平均掉，看不出台阶。
+unsafe fn panel_gradient(hdc: HDC, rc: RECT, s: f32) {
+    let total = (rc.bottom - rc.top).max(1);
+    let bands = ((total as f32 / (4.0 * s)).ceil() as i32).clamp(12, 64);
+    for i in 0..bands {
+        let t = (i as f32 + 0.5) / bands as f32;
+        let col = c(
+            lerp_u8(PANEL_TOP.0, PANEL_BOTTOM.0, t),
+            lerp_u8(PANEL_TOP.1, PANEL_BOTTOM.1, t),
+            lerp_u8(PANEL_TOP.2, PANEL_BOTTOM.2, t),
         );
+        let ya = rc.top + total * i / bands;
+        let yb = rc.top + total * (i + 1) / bands;
+        let br = CreateSolidBrush(col);
+        FillRect(hdc, &rect(rc.left, ya, rc.right - rc.left, (yb - ya).max(1)), br);
+        DeleteObject(HGDIOBJ(br.0));
+    }
+}
+
+/// 按钮瓷砖（对齐官网 replica）：
+///   普通  = 白底 + 浅灰细边
+///   悬停  = 白底 + 红边（图标也转红）
+///   选中  = 实心红底 + 同色红边 + 下方一层淡红投影，图标改白色
+unsafe fn button_bg(hdc: HDC, r: RECT, active: bool, hovered: bool, s_: f32) {
+    let red = accent();
+    if active {
+        let off = (2.0 * s_) as i32;
+        let sh = rect(r.left, r.top + off, r.right - r.left, r.bottom - r.top);
+        round_tile(hdc, sh, c(0xFF, 0xDD, 0xDE), c(0xFF, 0xDD, 0xDE), 1.0, 8.0, s_);
+        round_tile(hdc, r, red, red, 1.0, 8.0, s_);
+    } else if hovered {
+        round_tile(hdc, r, c(0xFF, 0xFF, 0xFF), red, 1.5, 8.0, s_);
     } else {
         round_tile(hdc, r, c(0xFF, 0xFF, 0xFF), c(0xD9, 0xDD, 0xE2), 1.0, 8.0, s_);
     }
@@ -535,13 +591,22 @@ unsafe fn slider_apply(hwnd: HWND, r: RECT, x: i32, state_ptr: *const RefCell<Ap
 }
 
 unsafe fn draw_swatch(hdc: HDC, r: RECT, color: Color, selected: bool, s: f32) {
-    // 圆角色块：填充本色；描边选中时蓝色加粗，未选中浅灰细边
-    // （白色块靠灰边和白色瓷砖区分开来）
+    // 官网同款：选中时在色块外围套一圈 2px 红环，色块本身留 2px 白边
+    // 把红环和填充色隔开（不然「选中红色」会红成一片，看不出来）。
     let fill = COLORREF(
         ((color.blue() as u32) << 16) | ((color.green() as u32) << 8) | color.red() as u32,
     );
     if selected {
-        round_tile(hdc, r, fill, c(0x0A, 0x84, 0xFF), 3.0, 6.0, s);
+        let g = (2.0 * s) as i32;
+        let ring = rect(
+            r.left - g,
+            r.top - g,
+            (r.right - r.left) + 2 * g,
+            (r.bottom - r.top) + 2 * g,
+        );
+        let red = accent();
+        round_tile(hdc, ring, red, red, 1.0, 8.0, s);
+        round_tile(hdc, r, fill, c(0xFF, 0xFF, 0xFF), 2.0, 6.0, s);
     } else {
         round_tile(hdc, r, fill, c(0xB7, 0xBC, 0xC3), 1.0, 6.0, s);
     }
@@ -620,18 +685,28 @@ unsafe fn paint_content(
     s: f32,
     state_ptr: *const RefCell<AppState>,
 ) {
-    let bg = CreateSolidBrush(c(0xFF, 0xFF, 0xFF));
-    FillRect(hdc, &rc, bg);
-    DeleteObject(HGDIOBJ(bg.0));
+    // 展开态用官网同款浅渐变面板；收纳态仍是原来的白底小方块，
+    // 免得半透明铅笔图标背后突然多出一块渐变色。
+    if EXPANDED {
+        panel_gradient(hdc, rc, s);
+    } else {
+        let bg = CreateSolidBrush(c(0xFF, 0xFF, 0xFF));
+        FillRect(hdc, &rc, bg);
+        DeleteObject(HGDIOBJ(bg.0));
+    }
 
-    // 面板整体一圈细边框：白色背景下让工具条有个清晰的外轮廓（PixPin 同款）
+    // 面板整体一圈细边框：浅色背景下让工具条有个清晰的外轮廓
     let border_r = rect(
         rc.left + (s as i32),
         rc.top + (s as i32),
         (rc.right - rc.left) - (s as i32) * 2,
         (rc.bottom - rc.top) - (s as i32) * 2,
     );
-    round_tile(hdc, border_r, c(0xFF, 0xFF, 0xFF), c(0xDD, 0xE0, 0xE5), 1.0, 14.0, s);
+    if EXPANDED {
+        round_outline(hdc, border_r, c(PANEL_LINE.0, PANEL_LINE.1, PANEL_LINE.2), 1.0, 14.0, s);
+    } else {
+        round_tile(hdc, border_r, c(0xFF, 0xFF, 0xFF), c(0xDD, 0xE0, 0xE5), 1.0, 14.0, s);
+    }
 
     if !EXPANDED {
         // 收纳态：把主图标画在一个「和展开态按钮同样大」的居中方块里。
@@ -656,17 +731,21 @@ unsafe fn paint_content(
     let width = st.as_ref().map(|x| x.width).unwrap_or(4.0);
     drop(st);
 
-    for &(r, act) in items.iter() {
+    for (idx, &(r, act)) in items.iter().enumerate() {
+        let hov = HOVER_IDX == idx as i32 && EXPANDED;
         match act {
             Action::Tool(t) => {
                 let on = t == tool;
-                button_bg(hdc, r, on, s);
-                icons::draw_tool_icon(
-                    hdc,
-                    icon_rect(r, s),
-                    t,
-                    if on { icons::ACTIVE } else { icons::NORMAL },
-                );
+                button_bg(hdc, r, on, hov, s);
+                // 红底上必须换白图标；悬停（未选中）则把深灰图标转成品牌红。
+                let ink = if on {
+                    icons::ACTIVE_ON
+                } else if hov {
+                    icons::ACTIVE
+                } else {
+                    icons::NORMAL
+                };
+                icons::draw_tool_icon(hdc, icon_rect(r, s), t, ink);
             }
             Action::Main => draw_pencil(hdc, r, s),
             Action::ColorIdx(i) => draw_swatch(hdc, r, PALETTE[i], PALETTE[i] == color, s),
@@ -688,12 +767,20 @@ unsafe fn paint_content(
                 DeleteObject(HGDIOBJ(pen.0));
             }
             Action::Undo => {
-                button_bg(hdc, r, false, s);
-                icons::draw_undo(hdc, icon_rect(r, s), icons::NORMAL);
+                button_bg(hdc, r, false, hov, s);
+                icons::draw_undo(
+                    hdc,
+                    icon_rect(r, s),
+                    if hov { icons::ACTIVE } else { icons::NORMAL },
+                );
             }
             Action::Clear => {
-                button_bg(hdc, r, false, s);
-                icons::draw_clear(hdc, icon_rect(r, s), icons::NORMAL);
+                button_bg(hdc, r, false, hov, s);
+                icons::draw_clear(
+                    hdc,
+                    icon_rect(r, s),
+                    if hov { icons::ACTIVE } else { icons::NORMAL },
+                );
             }
             Action::Select => {
                 // 按钮已删除，这里不再会有实例（枚举保留以兼容旧状态）
@@ -849,7 +936,7 @@ unsafe extern "system" fn toolbar_wndproc(
             // 状态签名：仅当尺寸或 tool/color/width 变化才重画内容，
             // 否则直接复用已缓存的 4x 位图，避免每次 WM_PAINT 重光栅化所有按钮。
             let sig = if state_ptr.is_null() {
-                (0u8, 0u8, 0u32, 0i32, w, h)
+                (0u8, 0u8, 0u32, 0i32, w, h, HOVER_IDX)
             } else {
                 let st = (*state_ptr).borrow();
                 (
@@ -859,6 +946,7 @@ unsafe extern "system" fn toolbar_wndproc(
                     (st.width * 100.0) as i32,
                     w,
                     h,
+                    HOVER_IDX,
                 )
             };
             if unsafe { TB_SIG } != sig {
@@ -903,9 +991,20 @@ unsafe extern "system" fn toolbar_wndproc(
             }
             LRESULT(HTCAPTION as isize)
         }
+        WM_NCMOUSEMOVE_ => {
+            if HOVER_IDX != -1 {
+                HOVER_IDX = -1;
+                InvalidateRect(hwnd, None, false);
+            }
+            DefWindowProcW(hwnd, msg, wparam, lparam)
+        }
         WM_MOUSELEAVE => {
-            // 折叠态鼠标移出 → 隐藏提示
+            // 折叠态鼠标移出 → 隐藏提示；展开态 → 撤掉悬停高亮
             hide_tip();
+            if HOVER_IDX != -1 {
+                HOVER_IDX = -1;
+                InvalidateRect(hwnd, None, false);
+            }
             LRESULT(0)
         }
         WM_LBUTTONDOWN => {
@@ -943,16 +1042,31 @@ unsafe extern "system" fn toolbar_wndproc(
             LRESULT(0)
         }
         WM_MOUSEMOVE => {
-            // 折叠态：鼠标悬停时弹出提示，并追踪「移出」以便及时隐藏。
+            // 两种状态都要追踪「移出」：折叠态用来收提示，展开态用来撤悬停高亮。
+            let mut tme = TRACKMOUSEEVENT {
+                cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
+                dwFlags: TME_LEAVE,
+                hwndTrack: hwnd,
+                dwHoverTime: 0,
+            };
+            let _ = TrackMouseEvent(&mut tme);
             if !EXPANDED {
-                let mut tme = TRACKMOUSEEVENT {
-                    cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
-                    dwFlags: TME_LEAVE,
-                    hwndTrack: hwnd,
-                    dwHoverTime: 0,
-                };
-                let _ = TrackMouseEvent(&mut tme);
                 show_tip();
+            } else if !ICON_DOWN && !SLIDING {
+                // 和官网一致：鼠标压在哪个按钮上，哪个按钮就变红边 + 红图标。
+                // 只在「索引变化」时失效重绘，签名缓存会挡掉同一按钮内的重复刷新。
+                let x = (lparam.0 & 0xFFFF) as i16 as i32;
+                let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
+                let items = &layout_cached(SCALE).items;
+                let idx = items
+                    .iter()
+                    .position(|(r, a)| *a != Action::Separator && hit(r, x, y))
+                    .map(|i| i as i32)
+                    .unwrap_or(-1);
+                if idx != HOVER_IDX {
+                    HOVER_IDX = idx;
+                    InvalidateRect(hwnd, None, false);
+                }
             }
             if ICON_DOWN {
                 let mut pt = POINT::default();
@@ -1067,13 +1181,36 @@ unsafe fn apply_action(hwnd: HWND, act: Action, state_ptr: *const RefCell<AppSta
         Action::Tool(t) => {
             // 切工具前先把半截折线收掉，免得它一直挂在画面上
             canvas::finalize_pending();
+            let prev_tool = (*state_ptr).borrow().tool;
+            // 水印按钮是「开关」，不是普通工具：
+            //   没开 → 打开并弹框（预填上次文字）
+            //   已开 → 一键关掉：删水印、回选择、按钮熄灭
+            // 以前「再点一次」被当成「重新弹框」，退出水印只能靠清空文字回车，
+            // 太绕；现在点一下就退出，想改文字关掉后再点开即可。
+            if t == Tool::Watermark && prev_tool == Tool::Watermark {
+                canvas::close_watermark();
+                return;
+            }
             let tool = {
                 let mut st = (*state_ptr).borrow_mut();
                 // 再点一次同一个工具 = 退出该工具 → 回到「选择/编辑」，
-                // 画好的内容留在屏幕上，可以接着拖动/改大小（不再整体隐藏）
+                // 画好的内容留在屏幕上，可以接着拖动/改大小（不再整体隐藏）。
                 st.tool = if st.tool == t { Tool::Select } else { t };
                 st.tool
             };
+            // 从水印切走：文字输入框要立刻关掉，且不能把没确认的内容铺成水印。
+            // 工具条是 NOACTIVATE 窗口，点它不会让输入框失焦，所以必须显式关。
+            if prev_tool == Tool::Watermark && tool != Tool::Watermark {
+                crate::textedit::cancel_watermark_open();
+            }
+            // 切到另一个绘制工具 = 开始画新东西，上一张图的「生成即选中」
+            // 编辑态到此结束。否则在新工具里点中旧图元会被当成「拖走旧图元」，
+            // 连画一个压在它上面的新图形都做不到。
+            // 回到 Select / None 要保留选中：那正是「再点一次当前工具」进入
+            // 编辑态的路径，用户就是冲着刚画好的那个图元去的。
+            if tool != Tool::Select && tool != Tool::None {
+                canvas::select_none();
+            }
             if !canvas_hwnd.is_invalid() && tool != Tool::None {
                 canvas::show_canvas(canvas_hwnd);
                 raise_above_canvas(hwnd);
@@ -1123,7 +1260,11 @@ unsafe fn apply_action(hwnd: HWND, act: Action, state_ptr: *const RefCell<AppSta
             // 只进不退：点它一定是"进入选择模式并显示画布"，
             // 再点一次就退出的话，屏幕上的图案会突然消失（之前就是这个体验）
             canvas::finalize_pending();
+            let prev_tool = (*state_ptr).borrow().tool;
             (*state_ptr).borrow_mut().tool = Tool::Select;
+            if prev_tool == Tool::Watermark {
+                crate::textedit::cancel_watermark_open();
+            }
             if !canvas_hwnd.is_invalid() {
                 canvas::show_canvas(canvas_hwnd);
                 raise_above_canvas(hwnd);
@@ -1150,6 +1291,8 @@ unsafe fn raise_above_canvas(hwnd: HWND) {
 }
 
 unsafe fn toggle_expanded(hwnd: HWND) {
+    // 切换状态后鼠标位置的含义全变了，旧的悬停索引不能带过去
+    HOVER_IDX = -1;
     let mut wr = RECT::default();
     GetWindowRect(hwnd, &mut wr);
     // 主图标中心（收纳前后保持不动，避免「跳」）
@@ -1232,6 +1375,9 @@ unsafe fn toggle_expanded(hwnd: HWND) {
 
         // 收起前把半截折线落定，别让用户白画
         canvas::finalize_pending();
+        // 收纳会把 tool 切到 None（相当于离开水印工具）：水印框按「取消」关掉，
+        // 不能让预填的文字被当成确认过的水印铺满全屏。普通文字框照旧提交。
+        crate::textedit::cancel_watermark_open();
         // 正在打字就先提交（输入框是普通窗口，关掉它键盘焦点才真的还回去）
         crate::textedit::commit_open();
 

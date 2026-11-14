@@ -34,6 +34,9 @@ static mut TE_SHAPE_IDX: usize = usize::MAX;
 static mut TE_CLOSING: bool = false;
 /// 右键提交时置位：提交完把工具切回「选择」（Esc / 失焦提交不切，方便连续写字）
 static mut TE_EXIT_TOOL: bool = false;
+/// 「取消式关闭」：只销毁窗口、清编辑标志，不把文字写回、不铺水印。
+/// 切走水印工具时用它，避免把没确认的半截文字变成一块全屏水印。
+static mut TE_CANCEL: bool = false;
 
 // 右键消息常量自己定义：windows 0.58 里 WM_CONTEXTMENU 属于未开启的 feature，
 // 若写成 match 的消息分支会被编译器当成「变量绑定模式」吞掉其它消息
@@ -267,13 +270,18 @@ unsafe fn commit_and_close(hwnd: HWND) {
     let idx = TE_SHAPE_IDX;
     let mode = TE_MODE;
     let state_ptr = TE_STATE_PTR as *const RefCell<AppState>;
+    let cancel = TE_CANCEL;
 
     if !edit.is_invalid() && !state_ptr.is_null() {
         let mut buf = [0u16; 8192];
         let n = GetWindowTextW(edit, &mut buf);
         let text = String::from_utf16_lossy(&buf[..n.max(0) as usize]);
 
-        if mode == Mode::Watermark {
+        if cancel {
+            // 丢弃输入：只清编辑标志，绝不写 watermark_text / apply_watermark
+            (*state_ptr).borrow_mut().text_editing = false;
+            crate::dbg::log("水印输入取消：切走工具，丢弃未确认内容");
+        } else if mode == Mode::Watermark {
             if !text.trim().is_empty() {
                 {
                     let mut st = (*state_ptr).borrow_mut();
@@ -324,19 +332,19 @@ unsafe fn commit_and_close(hwnd: HWND) {
         TE_MODE = Mode::Text;
     }
 
-    // 右键提交额外收尾：工具切回「选择」，让刚写完的文字处于标准可选中态
-    // （有选中框，可直接拖动/缩放/滚轮改大小）。Esc、失焦提交不受影响，
-    // 仍留在文字工具，方便接着点下一处继续写。
-    if TE_EXIT_TOOL {
+    // 右键提交额外收尾。
+    // 以前这里把文字工具强行切回「选择」，结果提交完再点别处就变成
+    // 「空白 = 退出标注」，无法接着写第二处文字。现在文字工具一律保持
+    // Tool::Text：提交时 select_index(idx) 已经让刚写的字处于选中态
+    // （选中框 + 8 个手柄，可直接拖动/缩放/滚轮缩放），点空白则开新输入框。
+    // 水印由 canvas 的右键分支负责退出工具，这里不插手。
+    if TE_EXIT_TOOL && !cancel {
         TE_EXIT_TOOL = false;
         // 右键提交的按下事件已经被低级鼠标钩子清掉了「点击归属」，
         // 但提交后文字正处于可选中态，紧接着按 Del 应该能删掉它。
         crate::hooks::note_our_window_clicked();
-        if mode == Mode::Text && !state_ptr.is_null() {
-            (*state_ptr).borrow_mut().tool = crate::shape::Tool::Select;
-            // 工具条的按钮高亮是从 state.tool 读的，改完必须重绘
-            crate::toolbar::refresh();
-        }
+    } else {
+        TE_EXIT_TOOL = false;
     }
 
     let _ = DestroyWindow(hwnd);
@@ -350,6 +358,7 @@ unsafe fn commit_and_close(hwnd: HWND) {
         TE_FONT = HFONT(ptr::null_mut());
     }
     TE_CLOSING = false;
+    TE_CANCEL = false;
 }
 
 /// 输入框开着就直接提交并关掉（收纳工具条时用：键盘焦点要还回去）
@@ -361,6 +370,25 @@ pub fn commit_open() {
         if !IsWindow(TE_HWND).as_bool() {
             return;
         }
+        commit_and_close(TE_HWND);
+    }
+}
+
+/// 切走「水印」工具时调用：关掉水印输入框，丢弃尚未确认的文字。
+///
+/// 和 commit_open() 的区别很关键：水印输入框一打开就预填了上次的文字，
+/// 直接提交会把用户根本没点「确定」的内容铺成整屏水印。这里只关窗口、
+/// 清 text_editing 标志，不写回 watermark_text、不调用 apply_watermark。
+/// 只作用于水印模式，普通文字框仍走原来的提交/失焦逻辑。
+pub fn cancel_watermark_open() {
+    unsafe {
+        if TE_CLOSING || TE_CANCEL || TE_MODE != Mode::Watermark || TE_HWND.is_invalid() {
+            return;
+        }
+        if !IsWindow(TE_HWND).as_bool() {
+            return;
+        }
+        TE_CANCEL = true;
         commit_and_close(TE_HWND);
     }
 }

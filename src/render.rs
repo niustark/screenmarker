@@ -177,9 +177,9 @@ impl Renderer {
                 0,
                 0,
                 DEFAULT_CHARSET.0 as u32,
+                OUT_TT_ONLY_PRECIS.0 as u32, // 强制 TrueType 轮廓，抗锯齿才生效
                 0,
-                0,
-                0,
+                ANTIALIASED_QUALITY.0 as u32, // 灰度抗锯齿：去掉文字边缘的锯齿
                 0,
                 w!("Microsoft YaHei"),
             );
@@ -287,9 +287,9 @@ impl Renderer {
                 0,
                 0,
                 DEFAULT_CHARSET.0 as u32,
+                OUT_TT_ONLY_PRECIS.0 as u32, // 强制 TrueType 轮廓，抗锯齿才生效
                 0,
-                0,
-                0,
+                ANTIALIASED_QUALITY.0 as u32, // 灰度抗锯齿：去掉文字边缘的锯齿
                 0,
                 w!("Microsoft YaHei"),
             );
@@ -880,9 +880,9 @@ pub fn measure_text_box(text: &str, font_size: i32, min_chars: f32) -> (f32, f32
             0,
             0,
             DEFAULT_CHARSET.0 as u32,
+            OUT_TT_ONLY_PRECIS.0 as u32, // 与绘制用同一套字形微调，量出的框才不会错位
             0,
-            0,
-            0,
+            ANTIALIASED_QUALITY.0 as u32,
             0,
             w!("Microsoft YaHei"),
         );
@@ -941,9 +941,9 @@ pub fn measure_text_height(text: &str, width: i32, font_size: i32) -> i32 {
             0,
             0,
             DEFAULT_CHARSET.0 as u32,
+            OUT_TT_ONLY_PRECIS.0 as u32, // 与绘制用同一套字形微调，量出的框才不会错位
             0,
-            0,
-            0,
+            ANTIALIASED_QUALITY.0 as u32,
             0,
             w!("Microsoft YaHei"),
         );
@@ -1440,9 +1440,9 @@ fn measure_ink(s: &str, font_size: i32) -> Option<(i32, i32, i32, i32)> {
             0,
             0,
             DEFAULT_CHARSET.0 as u32,
+            OUT_TT_ONLY_PRECIS.0 as u32, // 与绘制用同一套字形微调，量出的框才不会错位
             0,
-            0,
-            0,
+            ANTIALIASED_QUALITY.0 as u32,
             0,
             w!("Microsoft YaHei"),
         );
