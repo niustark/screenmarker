@@ -45,6 +45,17 @@ static mut PEEK: bool = false;
 /// 亮相结束的定时器 id（只在这一处用，随意取个不冲突的小整数）
 const HINT_TIMER_ID: usize = 0x51;
 const HINT_HOLD_MS: u32 = 2200;
+/// 亮相的淡入淡出：定时器逐帧改分层窗口的整体 alpha。
+/// 收纳态本来就是 180，展开态是 255，所以淡入就是 180→255、淡出 255→180，
+/// 两头都落在「正常值」上，动画结束不会有一下亮度跳变。
+const FADE_TIMER_ID: usize = 0x52;
+const FADE_STEP_MS: u32 = 16;
+const FADE_STEP_ALPHA: i32 = 12;
+static mut FADE_CUR: i32 = 180;
+static mut FADE_TARGET: i32 = 180;
+/// 淡出结束后要不要真的缩回收纳图标（亮相的退场靠这个衔接）
+static mut FADE_COLLAPSE_AFTER: bool = false;
+
 /// 亮相期间被点了一下：这一下的「抬起」要吃掉。
 /// 因为展开是把主图标钉在原地，光标正好落在铅笔上，
 /// 不吞掉的话抬起会被当成「点主图标」→ 刚展开又被收回，等于白点。
@@ -876,21 +887,39 @@ unsafe fn start_first_run_peek(hwnd: HWND) {
     let y = cy - main_r.top - (main_r.bottom - main_r.top) / 2;
 
     SetWindowPos(hwnd, HWND_TOPMOST, x, y, w, h, SWP_SHOWWINDOW);
-    SetLayeredWindowAttributes(hwnd, COLORREF(0), 255, LWA_ALPHA);
     apply_round_region(hwnd, w, h);
     WIN_W = w;
     WIN_H = h;
     InvalidateRect(hwnd, None, true);
+
+    // 先按收纳态的半透明亮相，再淡入到全不透明 —— 直接「啪」地铺开太生硬
+    FADE_CUR = 180;
+    SetLayeredWindowAttributes(hwnd, COLORREF(0), 180, LWA_ALPHA);
+    start_fade(hwnd, 255);
     SetTimer(hwnd, HINT_TIMER_ID, HINT_HOLD_MS, None);
 }
 
-/// 结束亮相：缩回收纳态，尺寸与透明度都回到正常收纳值（图标位置保持不动）。
+/// 结束亮相：先淡出到收纳态的透明度，动画走完再缩回小图标。
 unsafe fn end_first_run_peek(hwnd: HWND) {
+    if !PEEK {
+        return;
+    }
+    let _ = KillTimer(hwnd, HINT_TIMER_ID);
+    FADE_COLLAPSE_AFTER = true;
+    start_fade(hwnd, 180);
+}
+
+/// 立刻收干净、不带动画（亮相中途被点击/按键打断时用：
+/// 那时候要马上算准窗口尺寸去做真展开，等不了淡出）。
+unsafe fn peek_finish_now(hwnd: HWND) {
     if !PEEK {
         return;
     }
     PEEK = false;
     let _ = KillTimer(hwnd, HINT_TIMER_ID);
+    let _ = KillTimer(hwnd, FADE_TIMER_ID);
+    FADE_COLLAPSE_AFTER = false;
+    FADE_CUR = 180;
     EXPANDED = false;
     HOVER_IDX = -1;
 
@@ -909,6 +938,42 @@ unsafe fn end_first_run_peek(hwnd: HWND) {
     InvalidateRect(hwnd, None, true);
 }
 
+/// 开始一段淡入淡出：记下终点，交给定时器逐帧推进。
+unsafe fn start_fade(hwnd: HWND, target: i32) {
+    FADE_TARGET = target.clamp(0, 255);
+    if FADE_CUR == FADE_TARGET {
+        // 已经在终点了，直接收尾，别留一个空转的定时器
+        finish_fade(hwnd);
+        return;
+    }
+    SetTimer(hwnd, FADE_TIMER_ID, FADE_STEP_MS, None);
+}
+
+/// 推进一帧（由 WM_TIMER 调）。到头了就收尾。
+unsafe fn step_fade(hwnd: HWND) {
+    let diff = FADE_TARGET - FADE_CUR;
+    if diff.abs() <= FADE_STEP_ALPHA {
+        FADE_CUR = FADE_TARGET;
+    } else if diff > 0 {
+        FADE_CUR += FADE_STEP_ALPHA;
+    } else {
+        FADE_CUR -= FADE_STEP_ALPHA;
+    }
+    SetLayeredWindowAttributes(hwnd, COLORREF(0), FADE_CUR.clamp(0, 255) as u8, LWA_ALPHA);
+    if FADE_CUR == FADE_TARGET {
+        finish_fade(hwnd);
+    }
+}
+
+/// 一段淡入淡出结束：停表，并按需把亮相真正缩回收纳图标。
+unsafe fn finish_fade(hwnd: HWND) {
+    let _ = KillTimer(hwnd, FADE_TIMER_ID);
+    if FADE_COLLAPSE_AFTER {
+        FADE_COLLAPSE_AFTER = false;
+        peek_finish_now(hwnd);
+    }
+}
+
 // ---------- 窗口过程 ----------
 
 unsafe extern "system" fn toolbar_wndproc(
@@ -917,8 +982,12 @@ unsafe extern "system" fn toolbar_wndproc(
     let state_ptr = TOOLBAR_STATE_PTR as *const RefCell<AppState>;
     match msg {
         WM_TIMER if wparam.0 == HINT_TIMER_ID => {
-            // 亮相时间到：缩回收纳图标
+            // 亮相时间到：淡出后缩回收纳图标
             end_first_run_peek(hwnd);
+            LRESULT(0)
+        }
+        WM_TIMER if wparam.0 == FADE_TIMER_ID => {
+            step_fade(hwnd);
             LRESULT(0)
         }
         WM_PAINT => {
@@ -1013,7 +1082,7 @@ unsafe extern "system" fn toolbar_wndproc(
                 // 亮相这两秒里被点到，说明用户就是要打开它：先缩回再走真展开，
                 // 这一下点击整体吃掉（不然抬起会落到光标底下的按钮上）。
                 PEEK_SWALLOW_UP = true;
-                end_first_run_peek(hwnd);
+                peek_finish_now(hwnd);
                 if !state_ptr.is_null() {
                     toggle_expanded(hwnd);
                 }
@@ -1309,7 +1378,7 @@ unsafe fn toggle_expanded(hwnd: HWND) {
     // 先把亮相收干净 —— 它会把自己算成收纳态缩回去，
     // 于是下面这句「取反」正好变成一次货真价实的展开，锚点也算得准。
     if PEEK {
-        end_first_run_peek(hwnd);
+        peek_finish_now(hwnd);
     }
     // 切换状态后鼠标位置的含义全变了，旧的悬停索引不能带过去
     HOVER_IDX = -1;
