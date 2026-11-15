@@ -39,6 +39,9 @@ static mut CANVAS_HINSTANCE: usize = 0;
 static mut CURRENT_DRAWING: Option<Shape> = None;
 static mut CURRENT_POLY: Vec<Point> = Vec::new();
 static mut DRAW_START: Option<Point> = None;
+/// 画笔 / 荧光笔：按下只是「起笔」，光标离起点超过这个距离才真正生成笔迹。
+/// 单击（或按下时手抖一两像素）不会留下一个孤立的小点 / 色斑。
+const FREEHAND_MIN_DRAG: f32 = 4.0;
 static mut SELECTED: Option<usize> = None;
 static mut DRAG_LAST: Option<Point> = None;
 // 进程级保留一份 state 的 Rc，方便文字编辑框等模块克隆使用
@@ -1439,18 +1442,10 @@ fn begin_draw(st: &mut AppState, p: Point) {
     unsafe {
         DRAW_START = Some(p);
         CURRENT_DRAWING = match st.tool {
-            Tool::Pen => Some(Shape::Freehand {
-                points: vec![p],
-                color: st.color,
-                width: st.width,
-                alpha: 255,
-            }),
-            Tool::Highlighter => Some(Shape::Freehand {
-                points: vec![p],
-                color: st.color,
-                width: st.width * 2.5,
-                alpha: 110,
-            }),
+            // 画笔 / 荧光笔按下时只记起笔点（DRAW_START），不建临时图形：
+            // 真正的笔迹由 update_draw 在「拖动超过阈值」时才生成。
+            // 这样单击不会留下一个孤立小点，也不会有按下瞬间闪一下的点。
+            Tool::Pen | Tool::Highlighter => None,
             Tool::Rectangle => Some(Shape::Rect {
                 rect: Rect {
                     x: p.x,
@@ -1539,8 +1534,32 @@ fn begin_draw(st: &mut AppState, p: Point) {
     }
 }
 
-fn update_draw(_st: &mut AppState, p: Point) {
+fn update_draw(st: &mut AppState, p: Point) {
     unsafe {
+        // 画笔 / 荧光笔的「起笔」阶段：CURRENT_DRAWING 还是空的，
+        // 只有光标离起笔点足够远才落下图元；阈值内的抖动一律忽略，
+        // 松手时 end_draw 拿不到图形，就等于一次普通点击。
+        if CURRENT_DRAWING.is_none() && matches!(st.tool, Tool::Pen | Tool::Highlighter) {
+            if let Some(start) = DRAW_START {
+                let dx = p.x - start.x;
+                let dy = p.y - start.y;
+                if dx * dx + dy * dy >= FREEHAND_MIN_DRAG * FREEHAND_MIN_DRAG {
+                    let (width, alpha) = if st.tool == Tool::Highlighter {
+                        (st.width * 2.5, 110)
+                    } else {
+                        (st.width, 255)
+                    };
+                    CURRENT_DRAWING = Some(Shape::Freehand {
+                        // 起点一并补上，快速甩第一笔也不会丢掉开头那一截
+                        points: vec![start, p],
+                        color: st.color,
+                        width,
+                        alpha,
+                    });
+                }
+            }
+            return;
+        }
         if let Some(sh) = &mut CURRENT_DRAWING {
             match sh {
                 Shape::Freehand { points, .. } => points.push(p),

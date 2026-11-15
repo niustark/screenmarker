@@ -42,8 +42,8 @@
 <tr><th width="110">工具</th><th>说明</th></tr>
 </thead>
 <tbody>
-<tr><td>画笔</td><td>自由手绘线条</td></tr>
-<tr><td>荧光</td><td>半透明荧光笔效果，适合划重点</td></tr>
+<tr><td>画笔</td><td>自由手绘线条；<strong>按住拖动才生成笔迹</strong>，单击不落点</td></tr>
+<tr><td>荧光</td><td>半透明荧光笔效果，适合划重点；同样<strong>按住拖动才生成笔迹</strong>，单击不落点</td></tr>
 <tr><td>矩形</td><td>画矩形框；<strong>按住 Shift 拖动可画正方形</strong></td></tr>
 <tr><td>圆</td><td>画椭圆；<strong>按住 Shift 拖动可画正圆</strong></td></tr>
 <tr><td>文字</td><td>点击屏幕任意处输入文字，<code>回车</code>确认后<strong>仍停在文字工具</strong>，可继续点别处输入下一段；确认后的文字自动选中，可拖动 / 缩放 / 改颜色字号。在输入框内点右键结束输入，未输入内容则丢弃输入框</td></tr>
