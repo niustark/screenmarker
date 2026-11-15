@@ -40,6 +40,16 @@ static mut SCALE: f32 = 1.0;
 static mut WIN_W: i32 = 0;
 static mut WIN_H: i32 = 0;
 
+/// 首次启动「亮相」是否正在进行：此时窗口是展开尺寸，但状态仍是收纳态。
+static mut PEEK: bool = false;
+/// 亮相结束的定时器 id（只在这一处用，随意取个不冲突的小整数）
+const HINT_TIMER_ID: usize = 0x51;
+const HINT_HOLD_MS: u32 = 2200;
+/// 亮相期间被点了一下：这一下的「抬起」要吃掉。
+/// 因为展开是把主图标钉在原地，光标正好落在铅笔上，
+/// 不吞掉的话抬起会被当成「点主图标」→ 刚展开又被收回，等于白点。
+static mut PEEK_SWALLOW_UP: bool = false;
+
 // 4 倍超采样位图缓存。WM_PAINT 每次都 CreateCompatibleBitmap(w*4,h*4)
 // 会反复分配/释放好几 MB；窗口尺寸不变时（展开/收纳切换时才变）直接复用。
 static mut SS_DC: isize = 0;
@@ -799,6 +809,106 @@ unsafe fn apply_round_region(hwnd: HWND, w: i32, h: i32) {
     let _ = SetWindowRgn(hwnd, rgn, true);
 }
 
+// ---------- 首次启动的一次性「亮相」 ----------
+//
+// 收纳态的悬停气泡删掉之后，新用户第一次只看到一个小图标，未必知道能点。
+// 与其加文字提示，不如让它自己展示一次：首次启动时展开成完整面板停两秒再缩回去。
+// 相比气泡的好处是「用形态本身说话」——不用读字就知道这是个工具条、在哪儿、长什么样。
+
+/// 首次运行的标记文件。故意放在 `%LOCALAPPDATA%\ScreenMarker\` 而不是注册表：
+///   - exe 是免安装的，注册表里多一个键就多一处残留；
+///   - 用户想再看一次时，直接删掉这个文件就行，不用教他改注册表。
+fn hint_marker_path() -> Option<std::path::PathBuf> {
+    let base = std::env::var_os("LOCALAPPDATA")?;
+    Some(
+        std::path::PathBuf::from(base)
+            .join("ScreenMarker")
+            .join("first-run.seen"),
+    )
+}
+
+fn hint_already_shown() -> bool {
+    matches!(hint_marker_path(), Some(p) if p.exists())
+}
+
+fn mark_hint_shown() {
+    if let Some(p) = hint_marker_path() {
+        if let Some(dir) = p.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let _ = std::fs::write(&p, b"1");
+    }
+}
+
+/// 展开态里主图标（铅笔）的那一格矩形，用来对齐锚点、避免亮相时图标乱跳。
+unsafe fn main_icon_rect() -> RECT {
+    layout_cached(SCALE)
+        .items
+        .iter()
+        .find(|(_, a)| *a == Action::Main)
+        .map(|(r, _)| *r)
+        .unwrap_or(rect(0, 0, (BTN * SCALE) as i32, (BTN * SCALE) as i32))
+}
+
+/// 开始亮相：只改窗口尺寸与绘制，**不碰画布、工具、穿透态**。
+///
+/// 为什么不去复用 toggle_expanded？因为那条路是真展开 —— 会顺手铺开全屏画布、
+/// 关掉穿透态、把工具切成荧光笔、光标变荧光笔。为了「让人看一眼」而制造这些
+/// 副作用，用户屏幕上会闪一层透明画布，反而是打扰。这里只做个视觉上的展开。
+unsafe fn start_first_run_peek(hwnd: HWND) {
+    if hint_already_shown() {
+        return;
+    }
+    mark_hint_shown(); // 先记上，免得中途崩溃导致每次启动都来一遍
+
+    PEEK = true;
+    EXPANDED = true;
+    HOVER_IDX = -1;
+
+    let (w, h) = expanded_size();
+    let main_r = main_icon_rect();
+    // 收纳态窗口只有 52×52、图标画在正中，所以窗口中心就是图标中心
+    let mut wr = RECT::default();
+    GetWindowRect(hwnd, &mut wr);
+    let cx = (wr.left + wr.right) / 2;
+    let cy = (wr.top + wr.bottom) / 2;
+    let x = cx - main_r.left - (main_r.right - main_r.left) / 2;
+    let y = cy - main_r.top - (main_r.bottom - main_r.top) / 2;
+
+    SetWindowPos(hwnd, HWND_TOPMOST, x, y, w, h, SWP_SHOWWINDOW);
+    SetLayeredWindowAttributes(hwnd, COLORREF(0), 255, LWA_ALPHA);
+    apply_round_region(hwnd, w, h);
+    WIN_W = w;
+    WIN_H = h;
+    InvalidateRect(hwnd, None, true);
+    SetTimer(hwnd, HINT_TIMER_ID, HINT_HOLD_MS, None);
+}
+
+/// 结束亮相：缩回收纳态，尺寸与透明度都回到正常收纳值（图标位置保持不动）。
+unsafe fn end_first_run_peek(hwnd: HWND) {
+    if !PEEK {
+        return;
+    }
+    PEEK = false;
+    let _ = KillTimer(hwnd, HINT_TIMER_ID);
+    EXPANDED = false;
+    HOVER_IDX = -1;
+
+    let s = collapsed_size();
+    let main_r = main_icon_rect();
+    let mut wr = RECT::default();
+    GetWindowRect(hwnd, &mut wr);
+    let cx = wr.left + (main_r.left + main_r.right) / 2;
+    let cy = wr.top + (main_r.top + main_r.bottom) / 2;
+
+    SetWindowPos(hwnd, HWND_TOPMOST, cx - s / 2, cy - s / 2, s, s, SWP_SHOWWINDOW);
+    SetLayeredWindowAttributes(hwnd, COLORREF(0), 180, LWA_ALPHA);
+    apply_round_region(hwnd, s, s);
+    WIN_W = s;
+    WIN_H = s;
+    InvalidateRect(hwnd, None, true);
+}
+
 // ---------- 窗口过程 ----------
 
 unsafe extern "system" fn toolbar_wndproc(
@@ -806,6 +916,11 @@ unsafe extern "system" fn toolbar_wndproc(
 ) -> LRESULT {
     let state_ptr = TOOLBAR_STATE_PTR as *const RefCell<AppState>;
     match msg {
+        WM_TIMER if wparam.0 == HINT_TIMER_ID => {
+            // 亮相时间到：缩回收纳图标
+            end_first_run_peek(hwnd);
+            LRESULT(0)
+        }
         WM_PAINT => {
             let mut ps = PAINTSTRUCT::default();
             let hdc = BeginPaint(hwnd, &mut ps);
@@ -894,6 +1009,16 @@ unsafe extern "system" fn toolbar_wndproc(
         }
         WM_LBUTTONDOWN => {
             crate::hooks::note_our_window_clicked();
+            if PEEK {
+                // 亮相这两秒里被点到，说明用户就是要打开它：先缩回再走真展开，
+                // 这一下点击整体吃掉（不然抬起会落到光标底下的按钮上）。
+                PEEK_SWALLOW_UP = true;
+                end_first_run_peek(hwnd);
+                if !state_ptr.is_null() {
+                    toggle_expanded(hwnd);
+                }
+                return LRESULT(0);
+            }
             if !EXPANDED {
                 // 收纳态的主图标既能拖走、也能点开：先记下按下位置，
                 // 松手时再看是「拖过」还是「只是点了一下」
@@ -935,7 +1060,7 @@ unsafe extern "system" fn toolbar_wndproc(
                 dwHoverTime: 0,
             };
             let _ = TrackMouseEvent(&mut tme);
-            if EXPANDED && !ICON_DOWN && !SLIDING {
+            if EXPANDED && !PEEK && !ICON_DOWN && !SLIDING {
                 // 和官网一致：鼠标压在哪个按钮上，哪个按钮就变红边 + 红图标。
                 // 只在「索引变化」时失效重绘，签名缓存会挡掉同一按钮内的重复刷新。
                 let x = (lparam.0 & 0xFFFF) as i16 as i32;
@@ -990,6 +1115,10 @@ unsafe extern "system" fn toolbar_wndproc(
             LRESULT(0)
         }
         WM_LBUTTONUP => {
+            if PEEK_SWALLOW_UP {
+                PEEK_SWALLOW_UP = false;
+                return LRESULT(0);
+            }
             if ICON_DOWN {
                 let dragged = ICON_DRAG;
                 ICON_DOWN = false;
@@ -1037,6 +1166,11 @@ unsafe extern "system" fn toolbar_wndproc(
         }
         WM_RBUTTONUP => {
             crate::hooks::note_our_window_clicked();
+            if PEEK {
+                // 亮相期间右键＝「我不想看」，收回去完事，不要顺手退出程序
+                end_first_run_peek(hwnd);
+                return LRESULT(0);
+            }
             // 右键不再弹菜单：
             //   展开态 → 收回主图标（和点主图标一个效果）
             //   收纳态 → 直接退出程序
@@ -1171,6 +1305,12 @@ unsafe fn raise_above_canvas(hwnd: HWND) {
 }
 
 unsafe fn toggle_expanded(hwnd: HWND) {
+    // 亮相途中被要求切换（按右 Ctrl、点图标、外部唤醒）：
+    // 先把亮相收干净 —— 它会把自己算成收纳态缩回去，
+    // 于是下面这句「取反」正好变成一次货真价实的展开，锚点也算得准。
+    if PEEK {
+        end_first_run_peek(hwnd);
+    }
     // 切换状态后鼠标位置的含义全变了，旧的悬停索引不能带过去
     HOVER_IDX = -1;
     let mut wr = RECT::default();
@@ -1364,7 +1504,9 @@ pub fn adjust_width(delta: f32) {
 }
 
 pub fn is_expanded() -> bool {
-    unsafe { EXPANDED }
+    // 亮相期间窗口虽然铺开了，但对用户来说还没「进入标注」，
+    // 所以滚轮等外部判断要当成收纳态，别去拦用户的滚轮。
+    unsafe { EXPANDED && !PEEK }
 }
 
 /// 外部改了 state.tool 后调用：刷新按钮高亮。
@@ -1448,6 +1590,9 @@ impl Toolbar {
                 SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW,
             );
             InvalidateRect(hwnd, None, true);
+
+            // 首次运行：展开亮相两秒再缩回去（之后永不再来）
+            start_first_run_peek(hwnd);
 
             Ok(Toolbar { hwnd })
         }
