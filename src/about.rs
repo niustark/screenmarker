@@ -1,7 +1,7 @@
-// 「关于」小窗口：软件名 + 版本号 + GitHub 图标按钮（点击跳转项目页）。
+// 「关于」小窗口：软件名 + 程序名 + 版本号 + 网站图标按钮（点击打开演示页面）。
 //
-// GitHub 图标由官方 Octocat 矢量路径经 GDI+ 直接绘制（见 ghlogo.rs），
-// 不依赖任何图片文件。
+// 历史：这里原本左右并排两个图标（GitHub Octocat + 网站铅笔）。GitHub 图标及其跳转已删除，
+// 只留铅笔图标并水平居中。铅笔由 GDI+ 多边形路径直接绘制（见 pencil.rs），不依赖图片文件。
 //
 // 所有尺寸都写成 96 DPI 下的「基准值」，实际绘制时乘以 SCALE，
 // 这样在 125% / 150% 缩放下窗口和文字不会被系统拉伸变糊。
@@ -22,24 +22,22 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 
 // ---- 96 DPI 下的基准布局（客户区坐标） ----
 const BASE_W: i32 = 320;
-const BASE_H: i32 = 216;
-const BASE_ICON_SZ: i32 = 48; // 两个图标的绘制框边长
-const BASE_ICON_GAP: i32 = 40; // 两个图标之间的水平间距
-const BASE_ICON_Y: i32 = 108; // 两个图标顶部的 y
-const BASE_NAME_Y: i32 = 26;
-const BASE_NAME_H: i32 = 30;
-const BASE_VER_Y: i32 = 58;
-const BASE_VER_H: i32 = 22;
-const BASE_DIV_Y: i32 = 94;
+const BASE_H: i32 = 232;
+const BASE_ICON_SZ: i32 = 48; // 图标的绘制框边长
+const BASE_ICON_Y: i32 = 130; // 图标顶部的 y
+const BASE_NAME_Y: i32 = 22;
+const BASE_NAME_H: i32 = 32;
+const BASE_SUB_Y: i32 = 58; // 「ScreenMarker」这一行
+const BASE_SUB_H: i32 = 24;
+const BASE_VER_Y: i32 = 88;
+const BASE_VER_H: i32 = 20;
+const BASE_DIV_Y: i32 = 116;
 const BASE_HINT_H: i32 = 20;
 const BASE_HINT_W: i32 = 60; // 提示文字框宽：足够完整放下 4 个汉字
 
-const GITHUB_URL: &str = "https://github.com/niustark/screenmarker";
 const WEB_URL: &str = "https://screenmarker.9niu.top/";
 
 static mut ABOUT_HWND: usize = 0;
-static mut GH_HOVER: bool = false;
-static mut GH_DOWN: bool = false;
 static mut WEB_HOVER: bool = false;
 static mut WEB_DOWN: bool = false;
 /// 当前窗口的 DPI 缩放系数（1.0 = 96 DPI）
@@ -61,20 +59,10 @@ fn client_h() -> i32 {
     sc(BASE_H)
 }
 
-/// GitHub 图标按钮的矩形（左半侧居中）
-fn gh_rect() -> RECT {
-    let sz = sc(BASE_ICON_SZ);
-    let gap = sc(BASE_ICON_GAP);
-    // 两个图标作为一组水平居中：总宽 = 2*sz + gap，GitHub 占左半边
-    let left = (client_w() - (sz * 2 + gap)) / 2;
-    rect(left, sc(BASE_ICON_Y), sz, sz)
-}
-
-/// 网站图标按钮的矩形（右半侧）
+/// 网站图标按钮的矩形（水平居中）
 fn web_rect() -> RECT {
     let sz = sc(BASE_ICON_SZ);
-    let gap = sc(BASE_ICON_GAP);
-    let left = (client_w() - (sz * 2 + gap)) / 2 + sz + gap;
+    let left = (client_w() - sz) / 2;
     rect(left, sc(BASE_ICON_Y), sz, sz)
 }
 
@@ -131,18 +119,6 @@ fn font(px: i32, weight: i32) -> HFONT {
     }
 }
 
-/// 在目标矩形内绘制 GitHub 图标：官方矢量路径，GDI+ 直接填充。
-unsafe fn draw_github(hdc: HDC, r: RECT) {
-    if !gdi_ready() {
-        return;
-    }
-    let mut g: *mut GpGraphics = std::ptr::null_mut();
-    if GdipCreateFromHDC(hdc, &mut g).0 == 0 && !g.is_null() {
-        crate::ghlogo::draw(g, r);
-        let _ = GdipDeleteGraphics(g);
-    }
-}
-
 /// 在目标矩形内绘制网站图标（铅笔）：GDI+ 多边形路径直接填充。
 unsafe fn draw_web(hdc: HDC, r: RECT) {
     if !gdi_ready() {
@@ -155,22 +131,14 @@ unsafe fn draw_web(hdc: HDC, r: RECT) {
     }
 }
 
-/// 画 GitHub 图标按钮：常态就是深色实心圆本身（矢量绘制），
-/// 悬浮/按下时在外面加一圈浅色光晕，不再另铺灰底，避免「圈套圈」。
-unsafe fn draw_gh_button(hdc: HDC) {
-    let r = gh_rect();
-    draw_halo(hdc, r, GH_HOVER, GH_DOWN);
-    draw_github(hdc, r);
-}
-
-/// 画网站图标按钮（铅笔）：悬浮/按下时同样加一圈浅色光晕。
+/// 画网站图标按钮（铅笔）：悬浮/按下时在图标外围加一圈浅色光晕。
 unsafe fn draw_web_button(hdc: HDC) {
     let r = web_rect();
     draw_halo(hdc, r, WEB_HOVER, WEB_DOWN);
     draw_web(hdc, r);
 }
 
-/// 图标按钮的悬停/按下光晕（圆形浅底），两个按钮共用。
+/// 图标按钮的悬停/按下光晕（圆形浅底）
 unsafe fn draw_halo(hdc: HDC, r: RECT, hover: bool, down: bool) {
     if hover || down {
         let grow = sc(if down { 9 } else { 7 });
@@ -195,14 +163,7 @@ unsafe fn draw_halo(hdc: HDC, r: RECT, hover: bool, down: bool) {
     }
 }
 
-/// 命中测试用的 GitHub 图标区域（含少量外扩，手感更宽松）
-fn gh_hit(x: i32, y: i32) -> bool {
-    let r = gh_rect();
-    let pad = sc(4);
-    x >= r.left - pad && x < r.right + pad && y >= r.top - pad && y < r.bottom + pad
-}
-
-/// 命中测试用的网站图标区域
+/// 命中测试用的网站图标区域（含少量外扩，手感更宽松）
 fn web_hit(x: i32, y: i32) -> bool {
     let r = web_rect();
     let pad = sc(4);
@@ -225,7 +186,7 @@ unsafe extern "system" fn about_wndproc(
             SetBkMode(hdc, TRANSPARENT);
 
             // 软件名
-            let name_font = font(21, 700);
+            let name_font = font(22, 700);
             let old_font = SelectObject(hdc, HGDIOBJ(name_font.0));
             SetTextColor(hdc, c(0x1C, 0x1C, 0x1E));
             let mut name: Vec<u16> = "画屏点睛".encode_utf16().collect();
@@ -237,6 +198,15 @@ unsafe extern "system" fn about_wndproc(
                 sc(BASE_NAME_H),
             );
             DrawTextW(hdc, &mut name, &mut r1, DT_CENTER | DT_SINGLELINE | DT_VCENTER);
+
+            // 程序名（画屏点睛的下一行）
+            let sub_font = font(14, 600);
+            SelectObject(hdc, HGDIOBJ(sub_font.0));
+            SetTextColor(hdc, c(0x4B, 0x52, 0x59));
+            let mut sub: Vec<u16> = "ScreenMarker".encode_utf16().collect();
+            sub.push(0);
+            let mut rs = rect(sc(16), sc(BASE_SUB_Y), client_w() - sc(32), sc(BASE_SUB_H));
+            DrawTextW(hdc, &mut sub, &mut rs, DT_CENTER | DT_SINGLELINE | DT_VCENTER);
 
             // 版本号
             let ver_font = font(13, 400);
@@ -257,24 +227,15 @@ unsafe extern "system" fn about_wndproc(
             SelectObject(hdc, op);
             DeleteObject(HGDIOBJ(pen.0));
 
-            // 两个图标按钮：GitHub 在左、网站在右
-            draw_gh_button(hdc);
+            // 只剩铅笔图标，水平居中
             draw_web_button(hdc);
 
-            // 按钮下方的提示文字：各对齐到对应图标下方
+            // 图标下方的提示文字
             let hint_font = font(12, 400);
             SelectObject(hdc, HGDIOBJ(hint_font.0));
             SetTextColor(hdc, c(0x8D, 0x94, 0x9C));
             let hint_y = sc(BASE_ICON_Y + BASE_ICON_SZ + 10);
             let hint_w = sc(BASE_HINT_W);
-            // 左图标下方：项目主页（文字框以图标中心为基准，宽可略超出图标）
-            let mut h1: Vec<u16> = "项目主页".encode_utf16().collect();
-            h1.push(0);
-            let gr = gh_rect();
-            let gr_cx = gr.left + (gr.right - gr.left) / 2;
-            let mut rl = rect(gr_cx - hint_w / 2, hint_y, hint_w, sc(BASE_HINT_H));
-            DrawTextW(hdc, &mut h1, &mut rl, DT_CENTER | DT_SINGLELINE | DT_VCENTER);
-            // 右图标下方：演示页面
             let mut h2: Vec<u16> = "演示页面".encode_utf16().collect();
             h2.push(0);
             let wr = web_rect();
@@ -284,6 +245,7 @@ unsafe extern "system" fn about_wndproc(
 
             SelectObject(hdc, old_font);
             DeleteObject(HGDIOBJ(name_font.0));
+            DeleteObject(HGDIOBJ(sub_font.0));
             DeleteObject(HGDIOBJ(ver_font.0));
             DeleteObject(HGDIOBJ(hint_font.0));
             EndPaint(hwnd, &ps);
@@ -293,10 +255,8 @@ unsafe extern "system" fn about_wndproc(
         WM_MOUSEMOVE => {
             let x = (lparam.0 & 0xFFFF) as i16 as i32;
             let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
-            let gh = gh_hit(x, y);
             let web = web_hit(x, y);
-            if gh != GH_HOVER || web != WEB_HOVER {
-                GH_HOVER = gh;
+            if web != WEB_HOVER {
                 WEB_HOVER = web;
                 InvalidateRect(hwnd, None, true);
             }
@@ -305,10 +265,7 @@ unsafe extern "system" fn about_wndproc(
         WM_LBUTTONDOWN => {
             let x = (lparam.0 & 0xFFFF) as i16 as i32;
             let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
-            if gh_hit(x, y) {
-                GH_DOWN = true;
-                InvalidateRect(hwnd, None, true);
-            } else if web_hit(x, y) {
+            if web_hit(x, y) {
                 WEB_DOWN = true;
                 InvalidateRect(hwnd, None, true);
             }
@@ -317,22 +274,10 @@ unsafe extern "system" fn about_wndproc(
         WM_LBUTTONUP => {
             let x = (lparam.0 & 0xFFFF) as i16 as i32;
             let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
-            let was_gh = GH_DOWN;
             let was_web = WEB_DOWN;
-            GH_DOWN = false;
             WEB_DOWN = false;
             InvalidateRect(hwnd, None, true);
-            if was_gh && gh_hit(x, y) {
-                // 用系统默认浏览器打开 GitHub 项目页
-                let _ = ShellExecuteW(
-                    hwnd,
-                    w!("open"),
-                    w!("https://github.com/niustark/screenmarker"),
-                    None,
-                    None,
-                    SW_SHOWNORMAL,
-                );
-            } else if was_web && web_hit(x, y) {
+            if was_web && web_hit(x, y) {
                 // 打开官方网站
                 let _ = ShellExecuteW(
                     hwnd,
