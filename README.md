@@ -3,7 +3,7 @@
 一款轻量、免安装的 Windows 桌面标注工具。双击即用，随时在屏幕上画圈、划线、打马赛克、加文字水印，适合录屏讲解、远程协作、演示汇报、截图说明等场景。
 
 ---
-![工具条](https://img.9niu.top/file/1795010805614_toolbar.jpg)
+![工具条](https://img.9niu.top/file/1795011580157_toolbar.gif)
 
 ## 特色
 
@@ -38,7 +38,6 @@
 
 工具条分上下两行：**上行是 13 个绘制工具**，**下行是颜色、粗细调节与常用操作**。
 **鼠标悬停任意按钮约 0.4 秒会显示它的功能说明**，移开即消失，不会挡住点击。
-![工具条展开态](https://screenmarker-assets.pages.dev/toolbar.png)
 <table>
 <thead>
 <tr><th width="110">工具</th><th>说明</th></tr>
