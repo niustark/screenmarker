@@ -3,11 +3,12 @@
 一款轻量、免安装的 Windows 桌面标注工具。双击即用，随时在屏幕上画圈、划线、打马赛克、加文字水印，适合录屏讲解、远程协作、演示汇报、截图说明等场景。
 
 ---
-![](https://img.9niu.top/file/1794715850620_工具条.gif)
+![工具条](https://img.9niu.top/file/1795010805614_toolbar.jpg)
+
 ## 特色
 
 - **免安装**：单文件 exe，双击即用，无需安装、不写注册表、不留后台服务。
-- **轻量低占用**：原生 Rust + Win32 实现，单文件约 420 KB，常驻内存占用极低。
+- **轻量低占用**：原生 Rust + Win32 实现，单文件约 435 KB，常驻内存占用极低。
 - **悬浮工具条**：平时收纳成一个半透明小图标，需要时一键展开，不挡视线。
 - **画完即穿透**：标注图层悬浮在所有窗口之上，画完可让鼠标穿透过去，不干扰下层程序。
 - **画面清爽**：图形画完不自动带选中框，需要编辑时点一下图元即可。
@@ -18,8 +19,7 @@
 ## 下载
 
 - **GitHub Releases（推荐）**：[github.com/niustark/screenmarker/releases](https://github.com/niustark/screenmarker/releases)
-- **蓝奏云 · 主线（国内加速）**：[https://niu19.lanzoue.com/b00b61a6ri](https://niu19.lanzoue.com/b00b61a6ri)　密码 `9527`
-- **蓝奏云 · 吾爱破解分支**：[https://niu19.lanzoue.com/b00b61w4qh](https://niu19.lanzoue.com/b00b61w4qh)　密码 `9527`（关于窗口为吾爱破解主题，功能与主线一致）
+- **蓝奏云（国内加速）**：[https://niu19.lanzoue.com/b00b61a6ri](https://niu19.lanzoue.com/b00b61a6ri)　密码 `9527`
 
 
 ## 快速开始
