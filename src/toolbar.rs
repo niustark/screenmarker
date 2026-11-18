@@ -26,6 +26,7 @@ use std::sync::{Mutex, OnceLock};
 use windows::core::*;
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::*;
+use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::GetDpiForSystem;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     ReleaseCapture, SetCapture, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
@@ -76,6 +77,14 @@ static mut TB_SIG: (u8, u8, u32, i32, i32, i32, i32) = (0, 0, 0, 0, 0, 0, -1);
 /// 当前鼠标悬停的按钮在 layout() 里的下标（-1 = 没有）。
 /// 官网演示页里悬停会让按钮变红边 + 红图标，这里保持同样的反馈。
 static mut HOVER_IDX: i32 = -1;
+
+// ---------- 工具按钮悬停说明 ----------
+// 与之前删掉的「收纳态气泡」不是一回事：这里是展开后逐个按钮讲功能，
+// 延时 380ms 才出现，扫过按钮不会乱弹；移开/点击/收纳立刻消失。
+static mut TIP_HWND: usize = 0;
+static mut TIP_TEXT: String = String::new();
+const TIP_TIMER_ID: usize = 0x53;
+const TIP_DELAY_MS: u32 = 380;
 
 /// Tool 枚举没有 repr(u8)，转一个稳定判别值用于渲染签名
 fn tool_id(t: Tool) -> u8 {
@@ -178,6 +187,37 @@ enum Action {
     Undo,
     Clear,
     Select,
+}
+
+/// 悬停提示文案：<名称>｜<作用>。分隔线和当前已删掉的按钮不给提示。
+fn tip_for_action(a: Action) -> Option<&'static str> {
+    Some(match a {
+        Action::Tool(t) => match t {
+            Tool::Pen => "画笔｜自由手绘线条，按住拖动才生成，单击不落点",
+            Tool::Highlighter => "荧光笔｜半透明划重点，按住拖动才生成",
+            Tool::Rectangle => "矩形｜拖动画方框，按住 Shift 画正方形",
+            Tool::Ellipse => "圆｜拖动画椭圆，按住 Shift 画正圆",
+            Tool::Text => "文字｜点击输入，回车确认，可接着写下一处",
+            Tool::Arrow => "箭头｜拖出带箭头的指向线",
+            Tool::Polyline => "折线｜连续点击画多段线，双击或右键结束",
+            Tool::Wavy => "波浪线｜拖出波浪下划线，适合圈注",
+            Tool::Magnifier => "放大镜｜局部放大，滚轮调范围，Ctrl+滚轮调倍率",
+            Tool::Spotlight => "聚光灯｜拖圆改位置，拉边缘调范围",
+            Tool::Watermark => "水印｜点一下开 / 关，Ctrl+滚轮调字号",
+            Tool::Number => "序号｜依次标 1、2、3…，删除后可回退",
+            Tool::Mosaic => "马赛克｜点一下建框，拖边框调范围",
+            Tool::Eraser => "橡皮擦｜按住拖动擦掉图元",
+            _ => return None,
+        },
+        Action::Main => "主图标｜收起 / 展开工具条",
+        Action::ColorIdx(_) => "颜色｜选画笔、文字、水印的颜色",
+        Action::Slider => "线宽 / 字号｜左右拖动调整粗细",
+        Action::WidthPreview => "线宽预览｜当前粗细与字号",
+        Action::Undo => "撤销｜删掉最后画的一个图元",
+        Action::Clear => "清空｜清掉屏幕上所有图元",
+        Action::Select => "选择｜点选图元后可拖动、缩放",
+        Action::Separator => return None,
+    })
 }
 
 /// 滑块对应的线宽区间（同时决定字号：font_size = width * 4）
@@ -820,6 +860,130 @@ unsafe fn apply_round_region(hwnd: HWND, w: i32, h: i32) {
     let _ = SetWindowRgn(hwnd, rgn, true);
 }
 
+// ---------- 工具按钮悬停说明 ----------
+//
+// 与收纳态那个已删除的气泡不同：这里是展开后逐个按钮讲功能。
+// 提示窗口带 WS_EX_TRANSPARENT，鼠标事件全部穿透给下面的工具条，
+// 不会挡住点击、也不会抢焦点；380ms 延时避免光标扫过时乱弹。
+
+unsafe extern "system" fn tip_wndproc(
+    hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM,
+) -> LRESULT {
+    match msg {
+        WM_PAINT => {
+            let mut ps = PAINTSTRUCT::default();
+            let hdc = BeginPaint(hwnd, &mut ps);
+            let mut rc = RECT::default();
+            GetClientRect(hwnd, &mut rc);
+
+            let bg = CreateSolidBrush(c(0x24, 0x24, 0x27));
+            FillRect(hdc, &rc, bg);
+            DeleteObject(HGDIOBJ(bg.0));
+
+            let fs = ((12.0 * SCALE) as i32).max(11);
+            let font = CreateFontW(
+                -fs, 0, 0, 0, 400, 0, 0, 0,
+                DEFAULT_CHARSET.0 as u32, 0, 0, 0, 0,
+                w!("Microsoft YaHei"),
+            );
+            let old_font = SelectObject(hdc, HGDIOBJ(font.0));
+            SetBkMode(hdc, TRANSPARENT);
+            SetTextColor(hdc, c(0xFF, 0xFF, 0xFF));
+            let mut wide: Vec<u16> = TIP_TEXT.encode_utf16().collect();
+            wide.push(0);
+            let pad = (10.0 * SCALE) as i32;
+            let mut rr = rc;
+            rr.left += pad;
+            rr.right -= pad;
+            rr.top += (5.0 * SCALE) as i32;
+            rr.bottom -= (5.0 * SCALE) as i32;
+            DrawTextW(hdc, &mut wide, &mut rr, DT_CENTER | DT_VCENTER | DT_WORDBREAK);
+            SelectObject(hdc, old_font);
+            DeleteObject(HGDIOBJ(font.0));
+
+            EndPaint(hwnd, &ps);
+            LRESULT(0)
+        }
+        WM_ERASEBKGND => LRESULT(1),
+        _ => DefWindowProcW(hwnd, msg, wparam, lparam),
+    }
+}
+
+/// 显示（或更新）提示。位置跟着光标走，右侧 / 下方空间不够就翻到另一侧。
+unsafe fn show_tool_tip(text: &str, cursor: POINT) {
+    if TIP_TEXT != text {
+        TIP_TEXT.clear();
+        TIP_TEXT.push_str(text);
+    }
+    let fs = (12.0 * SCALE).max(11.0);
+    // 中文按一字一宽、ASCII 按半宽估算，够算出气泡尺寸；DrawTextW 会再做精确折行
+    let units: f32 = TIP_TEXT.chars().map(|ch| if ch.is_ascii() { 0.58 } else { 1.0 }).sum();
+    let text_w = units * fs;
+    let w = (text_w + 26.0 * SCALE)
+        .clamp(140.0 * SCALE, 360.0 * SCALE) as i32;
+    let two_lines = text_w > 300.0 * SCALE;
+    let h = ((if two_lines { 46.0 } else { 30.0 }) * SCALE) as i32;
+
+    let sx = GetSystemMetrics(SM_CXSCREEN);
+    let sy = GetSystemMetrics(SM_CYSCREEN);
+    let mut x = cursor.x + (18.0 * SCALE) as i32;
+    let mut y = cursor.y + (22.0 * SCALE) as i32;
+    if x + w > sx {
+        x = cursor.x - w - (12.0 * SCALE) as i32;
+    }
+    if y + h > sy {
+        y = cursor.y - h - (12.0 * SCALE) as i32;
+    }
+    x = x.max(0);
+    y = y.max(0);
+
+    if TIP_HWND != 0 {
+        let hwnd = HWND(TIP_HWND as *mut _);
+        SetWindowPos(hwnd, HWND_TOPMOST, x, y, w, h, SWP_NOACTIVATE);
+        apply_round_region(hwnd, w, h);
+        InvalidateRect(hwnd, None, true);
+        return;
+    }
+
+    let hinst: HINSTANCE = GetModuleHandleW(None).unwrap_or_default().into();
+    let class_name = w!("ScreenMarkerToolTip");
+    let wc = WNDCLASSW {
+        lpfnWndProc: Some(tip_wndproc),
+        hInstance: hinst,
+        hbrBackground: HBRUSH(ptr::null_mut()),
+        lpszClassName: class_name,
+        ..Default::default()
+    };
+    RegisterClassW(&wc);
+    let hwnd = match CreateWindowExW(
+        WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TRANSPARENT,
+        class_name,
+        w!("ScreenMarkerToolTip"),
+        WS_POPUP,
+        x, y, w, h,
+        None, None, hinst, None,
+    ) {
+        Ok(h) => h,
+        Err(_) => return,
+    };
+    TIP_HWND = hwnd.0 as usize;
+    SetLayeredWindowAttributes(hwnd, COLORREF(0), 235, LWA_ALPHA);
+    apply_round_region(hwnd, w, h);
+    ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+    UpdateWindow(hwnd);
+}
+
+/// 隐藏提示；连定时器一起撤掉，否则光标移开后还会补弹一次。
+unsafe fn hide_tool_tip(hwnd: HWND) {
+    let _ = KillTimer(hwnd, TIP_TIMER_ID);
+    if TIP_HWND == 0 {
+        return;
+    }
+    let tip = HWND(TIP_HWND as *mut _);
+    TIP_HWND = 0;
+    let _ = DestroyWindow(tip);
+}
+
 // ---------- 首次启动的一次性「亮相」 ----------
 //
 // 收纳态的悬停气泡删掉之后，新用户第一次只看到一个小图标，未必知道能点。
@@ -875,6 +1039,7 @@ unsafe fn start_first_run_peek(hwnd: HWND) {
     PEEK = true;
     EXPANDED = true;
     HOVER_IDX = -1;
+    hide_tool_tip(hwnd);
 
     let (w, h) = expanded_size();
     let main_r = main_icon_rect();
@@ -922,6 +1087,7 @@ unsafe fn peek_finish_now(hwnd: HWND) {
     FADE_CUR = 180;
     EXPANDED = false;
     HOVER_IDX = -1;
+    hide_tool_tip(hwnd);
 
     let s = collapsed_size();
     let main_r = main_icon_rect();
@@ -988,6 +1154,22 @@ unsafe extern "system" fn toolbar_wndproc(
         }
         WM_TIMER if wparam.0 == FADE_TIMER_ID => {
             step_fade(hwnd);
+            LRESULT(0)
+        }
+        WM_TIMER if wparam.0 == TIP_TIMER_ID => {
+            // 延时到点：光标仍停在原按钮上才弹，快速划过时 HOVER_IDX 变化会撤掉定时器
+            let _ = KillTimer(hwnd, TIP_TIMER_ID);
+            let idx = HOVER_IDX;
+            if idx >= 0 && EXPANDED && !PEEK {
+                let items = &layout_cached(SCALE).items;
+                if let Some((_, act)) = items.get(idx as usize) {
+                    if let Some(text) = tip_for_action(*act) {
+                        let mut p = POINT::default();
+                        GetCursorPos(&mut p);
+                        show_tool_tip(text, p);
+                    }
+                }
+            }
             LRESULT(0)
         }
         WM_PAINT => {
@@ -1062,6 +1244,7 @@ unsafe extern "system" fn toolbar_wndproc(
             LRESULT(HTCAPTION as isize)
         }
         WM_NCMOUSEMOVE_ => {
+            hide_tool_tip(hwnd);
             if HOVER_IDX != -1 {
                 HOVER_IDX = -1;
                 InvalidateRect(hwnd, None, false);
@@ -1069,7 +1252,8 @@ unsafe extern "system" fn toolbar_wndproc(
             DefWindowProcW(hwnd, msg, wparam, lparam)
         }
         WM_MOUSELEAVE => {
-            // 鼠标移出工具条 → 撤掉悬停高亮（收纳态没有高亮，走空转）
+            // 鼠标移出工具条 → 撤掉悬停高亮和说明（收纳态没有高亮，走空转）
+            hide_tool_tip(hwnd);
             if HOVER_IDX != -1 {
                 HOVER_IDX = -1;
                 InvalidateRect(hwnd, None, false);
@@ -1078,6 +1262,7 @@ unsafe extern "system" fn toolbar_wndproc(
         }
         WM_LBUTTONDOWN => {
             crate::hooks::note_our_window_clicked();
+            hide_tool_tip(hwnd);
             if PEEK {
                 // 亮相这两秒里被点到，说明用户就是要打开它：先缩回再走真展开，
                 // 这一下点击整体吃掉（不然抬起会落到光标底下的按钮上）。
@@ -1143,6 +1328,15 @@ unsafe extern "system" fn toolbar_wndproc(
                 if idx != HOVER_IDX {
                     HOVER_IDX = idx;
                     InvalidateRect(hwnd, None, false);
+                    // 悬停说明延时弹出；换按钮 / 移到空白处都先撤掉旧的
+                    let _ = KillTimer(hwnd, TIP_TIMER_ID);
+                    if idx >= 0 && tip_for_action(
+                        layout_cached(SCALE).items[idx as usize].1,
+                    ).is_some() {
+                        SetTimer(hwnd, TIP_TIMER_ID, TIP_DELAY_MS, None);
+                    } else {
+                        hide_tool_tip(hwnd);
+                    }
                 }
             }
             if ICON_DOWN {
@@ -1380,8 +1574,9 @@ unsafe fn toggle_expanded(hwnd: HWND) {
     if PEEK {
         peek_finish_now(hwnd);
     }
-    // 切换状态后鼠标位置的含义全变了，旧的悬停索引不能带过去
+    // 切换状态后鼠标位置的含义全变了，旧的悬停索引和说明都不能带过去
     HOVER_IDX = -1;
+    hide_tool_tip(hwnd);
     let mut wr = RECT::default();
     GetWindowRect(hwnd, &mut wr);
     // 主图标中心（收纳前后保持不动，避免「跳」）
