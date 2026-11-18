@@ -405,7 +405,17 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
                 let through = crate::canvas::is_click_through();
                 let visible = !canvas_hwnd.is_invalid()
                     && IsWindowVisible(canvas_hwnd).as_bool();
-                let handle = expanded && !through && active && visible;
+                // 收纳态若有选中的图元，滚轮也要接管：用于缩放这个图元。
+                // 这正是「画完不自动选中、点一下重新选中后再滚轮缩放」的场景。
+                //
+                // 关键：收纳态本身就是穿透态（keep_canvas_exit / exit_markup
+                // 都会把 CLICK_THROUGH 置 true），所以这一支**不能**带 !through，
+                // 否则真机永远走不到，只有「按右 Ctrl 直接收工具条」这种
+                // 不改穿透标志的路径才会误以为验证通过。
+                // 无选中时仍保持收纳态完全透传（不误调线宽、不蜂鸣）。
+                let has_sel = canvas::has_selection();
+                let handle = (expanded && !through && active && visible)
+                    || (visible && has_sel);
                 // 滚轮分工（在 dispatch 里执行）：
                 //   水印 + 直接滚轮 → 完全放行：连动作消息都不投递，
                 //     浏览器/网页照常上下滚动，也不会整屏重绘、不会蜂鸣

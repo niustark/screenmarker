@@ -21,7 +21,12 @@ use windows::core::*;
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::UI::HiDpi::GetDpiForSystem;
-use windows::Win32::UI::Input::KeyboardAndMouse::{SetFocus, VK_ESCAPE, VK_RETURN};
+use windows::Win32::UI::Input::Ime::{
+    ImmGetCompositionStringW, ImmGetContext, ImmReleaseContext, GCS_COMPSTR,
+};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    GetAsyncKeyState, SetFocus, VK_ESCAPE, VK_MENU, VK_RETURN,
+};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 static mut TE_STATE_PTR: usize = 0;
@@ -44,6 +49,8 @@ static mut TE_CANCEL: bool = false;
 const WM_RBUTTONDOWN_C: u32 = 0x0204;
 const WM_RBUTTONUP_C: u32 = 0x0205;
 const WM_CONTEXTMENU_C: u32 = 0x007B;
+/// EM_REPLACESEL：在 EDIT 光标处插入文本（项目未开启 Controls feature，自定义常量）
+const EM_REPLACESEL_C: u32 = 0x00C2;
 
 /// 有图元从 `shapes` 里被删除时，同步修正正在编辑的文字框下标。
 /// Vec::remove 会让后面的元素整体前移，漏改会让「提交到另一个图元上」串台。
@@ -71,6 +78,19 @@ pub fn reset_shape_index() {
 /// 落到已被销毁窗口下面的画布上，触发画布自己的右键逻辑。
 fn is_right_click(msg: u32) -> bool {
     msg == WM_RBUTTONDOWN_C || msg == WM_RBUTTONUP_C || msg == WM_CONTEXTMENU_C
+}
+
+/// 中文输入法是否正在组字（拼音还没上屏）。
+/// 组字过程中的回车是「选字」，必须原样交给 IME，绝不能被当成「结束输入」。
+unsafe fn ime_composing(hwnd: HWND) -> bool {
+    let himc = ImmGetContext(hwnd);
+    if himc.0.is_null() {
+        return false;
+    }
+    // GCS_COMPSTR 查正在编辑的组字串字节数；0 = 没有在组字
+    let n = ImmGetCompositionStringW(himc, GCS_COMPSTR, None, 0);
+    let _ = ImmReleaseContext(hwnd, himc);
+    n > 0
 }
 
 /// 同一个输入窗口复用于两种场景：
@@ -112,8 +132,47 @@ unsafe extern "system" fn edit_proc(
                 return LRESULT(0);
             }
         }
-        // 水印输入是单行框，回车 = 确定（多行文字框里回车要留给换行）
-        if vk == VK_RETURN.0 && TE_MODE == Mode::Watermark {
+        // 回车处理（普通 KEYDOWN，Alt 组合键走下面的 WM_SYSKEYDOWN 分支）：
+        //   正在中文组字 → 放行，让 IME 选字
+        //   水印单行框 / 文字框且无 Alt → 提交结束
+        if vk == VK_RETURN.0 {
+            let alt = (GetAsyncKeyState(VK_MENU.0 as i32) as u16 & 0x8000) != 0;
+            if !alt && !ime_composing(hwnd) {
+                if let Ok(parent) = GetParent(hwnd) {
+                    if TE_MODE == Mode::Text {
+                        TE_EXIT_TOOL = true;
+                    }
+                    commit_and_close(parent);
+                    return LRESULT(0);
+                }
+            }
+            // Alt+回车：换行，注入 \r\n 让 EDIT 自己插入（ES_MULTILINE 认 \r\n）
+            if alt && TE_MODE == Mode::Text && !ime_composing(hwnd) {
+                let nl = windows::core::w!("\r\n");
+                let _ = SendMessageW(
+                    hwnd,
+                    EM_REPLACESEL_C,
+                    WPARAM(1),
+                    LPARAM(nl.as_ptr() as isize),
+                );
+                return LRESULT(0);
+            }
+        }
+    }
+    // Alt 组合键系统发 WM_SYSKEYDOWN 而非 WM_KEYDOWN，Alt+回车在这里兜底换行。
+    if msg == WM_SYSKEYDOWN && wparam.0 as u16 == VK_RETURN.0 {
+        if TE_MODE == Mode::Text && !ime_composing(hwnd) {
+            let nl = windows::core::w!("\r\n");
+            let _ = SendMessageW(
+                hwnd,
+                EM_REPLACESEL_C,
+                WPARAM(1),
+                LPARAM(nl.as_ptr() as isize),
+            );
+            return LRESULT(0);
+        }
+        // 水印单行框：Alt+回车也当确定
+        if TE_MODE == Mode::Watermark {
             if let Ok(parent) = GetParent(hwnd) {
                 commit_and_close(parent);
                 return LRESULT(0);
@@ -147,6 +206,32 @@ unsafe extern "system" fn te_wndproc(
         WM_KEYDOWN => {
             if wparam.0 as u16 == VK_ESCAPE.0 {
                 commit_and_close(hwnd);
+                return LRESULT(0);
+            }
+            // 焦点偶尔落在外层（刚弹出还没 SetFocus，或点了虚线框那圈）时，
+            // 回车同样要能结束；Alt+回车留给下面 WM_SYSKEYDOWN 处理换行。
+            if wparam.0 as u16 == VK_RETURN.0 {
+                let alt = (GetAsyncKeyState(VK_MENU.0 as i32) as u16 & 0x8000) != 0;
+                if !alt && !ime_composing(hwnd) {
+                    commit_and_close(hwnd);
+                    return LRESULT(0);
+                }
+            }
+            DefWindowProcW(hwnd, msg, wparam, lparam)
+        }
+        WM_SYSKEYDOWN => {
+            // Alt+回车 = 换行（文字框）。Alt 组合键走 SYS 分支。
+            if wparam.0 as u16 == VK_RETURN.0
+                && TE_MODE == Mode::Text
+                && !ime_composing(hwnd)
+            {
+                let nl = windows::core::w!("\r\n");
+                let _ = SendMessageW(
+                    TE_EDIT,
+                    EM_REPLACESEL_C,
+                    WPARAM(1),
+                    LPARAM(nl.as_ptr() as isize),
+                );
                 return LRESULT(0);
             }
             DefWindowProcW(hwnd, msg, wparam, lparam)

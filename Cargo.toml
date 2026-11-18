@@ -1,6 +1,6 @@
 [package]
 name = "screenmarker"
-version = "0.1.6"
+version = "0.1.7"
 edition = "2021"
 
 # 构建脚本与图标资源统一放在 res/（路径均相对包根）
@@ -17,6 +17,7 @@ windows = { version = "0.58", features = [
     "Win32_UI_WindowsAndMessaging",
     "Win32_UI_Shell",
     "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Input_Ime",
     "Win32_UI_HiDpi",
     "Win32_Graphics_Gdi",
     "Win32_Graphics_GdiPlus",

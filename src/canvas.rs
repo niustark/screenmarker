@@ -42,6 +42,13 @@ static mut DRAW_START: Option<Point> = None;
 /// 画笔 / 荧光笔：按下只是「起笔」，光标离起点超过这个距离才真正生成笔迹。
 /// 单击（或按下时手抖一两像素）不会留下一个孤立的小点 / 色斑。
 const FREEHAND_MIN_DRAG: f32 = 4.0;
+/// 画完图元后是否自动选中（显示手柄框）：
+///   false = 画完不选中，想编辑再手动点一下图元（当前试验态）；
+///   true  = 画完即选中，旧的「生成即选中」行为。
+/// 只影响纯绘制图元（矩形/椭圆/箭头/波浪/手绘/马赛克/折线/序号）。
+/// 放大镜/聚光灯/文字的选中是它们交互的前提，不受此开关影响。
+/// 试完想恢复：把它改回 true 重新编译即可。
+const AUTO_SELECT_AFTER_DRAW: bool = false;
 static mut SELECTED: Option<usize> = None;
 static mut DRAG_LAST: Option<Point> = None;
 // 进程级保留一份 state 的 Rc，方便文字编辑框等模块克隆使用
@@ -848,8 +855,8 @@ unsafe extern "system" fn canvas_wndproc(
                     st.shapes.len().checked_sub(1)
                 };
                 POLY_RUBBER = None;
-                // 收尾后顺手选中它，接着就能拖
-                SELECTED = idx;
+                // 收尾后是否选中它：按 AUTO_SELECT_AFTER_DRAW 决定（当前试验为不选中）
+                SELECTED = if AUTO_SELECT_AFTER_DRAW { idx } else { None };
                 {
                     let mut st = (*state_ptr).borrow_mut();
                     st.tool = Tool::Select;
@@ -903,7 +910,7 @@ unsafe extern "system" fn canvas_wndproc(
                     st.shapes.len().checked_sub(1)
                 };
                 POLY_RUBBER = None;
-                SELECTED = idx;
+                SELECTED = if AUTO_SELECT_AFTER_DRAW { idx } else { None };
                 // 绘制中一直抓着鼠标捕获，收尾后必须释放，否则工具条点不动
                 ReleaseCapture();
                 repaint(hwnd);
@@ -1518,7 +1525,11 @@ fn begin_draw(st: &mut AppState, p: Point) {
                     radius: number_radius(st.width),
                 });
                 // 序号是「点一下直接落定」，不走 end_draw，选中要在这里补。
-                SELECTED = Some(st.shapes.len() - 1);
+                SELECTED = if AUTO_SELECT_AFTER_DRAW {
+                    Some(st.shapes.len() - 1)
+                } else {
+                    None
+                };
                 None
             }
             Tool::Watermark => {
@@ -1691,7 +1702,12 @@ fn end_draw(st: &mut AppState, p: Point) {
         // 生成即选中：屏幕上当场出现选中框和 8 个手柄，接着就能拖着移动 /
         // 拉手柄缩放，不必先右键退出工具再点一下图形。
         // 太小的误触图形和抓屏失败的马赛克在上面的分支已经 return，不会走到这里。
-        SELECTED = Some(st.shapes.len() - 1);
+        // 受 AUTO_SELECT_AFTER_DRAW 控制：当前试验态为画完不选中。
+        SELECTED = if AUTO_SELECT_AFTER_DRAW {
+            Some(st.shapes.len() - 1)
+        } else {
+            None
+        };
     }
 }
 
